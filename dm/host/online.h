@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 int dm_online(void);   // DM_NEXTENDO=1
+int dmo_trace(void);   // DM_NEXTENDO_TRACE=1: every socket and TLS call in the log
 int dmo_errno(void);
 void dmo_set_errno(int e);
 int dmo_socket(int family, int type, int proto);

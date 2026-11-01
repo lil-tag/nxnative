@@ -71,6 +71,7 @@ static Result c_create(void *self) {
     if (!c) return R_ABORT;
     c->fd = c->gfd = -1; c->id = ++g_ids; c->verify = 3;
     objmap_put(self, c);
+    if (dmo_trace()) LOG("[online] trace TLS connection %p created", self);
     return RES_OK;
 }
 static Result c_destroy(void *self) {
@@ -86,9 +87,11 @@ static Result c_set_socket(conn_t *c, int gfd) {
     int h = dmo_host_fd(gfd);
     if (h < 0 || (c->fd = dup(h)) < 0) return R_INVALID_SOCKET;
     c->gfd = gfd;
+    if (dmo_trace()) LOG("[online] trace TLS connection takes socket %d", gfd);
     return RES_OK;
 }
 static Result c_handshake(conn_t *c) {
+    if (dmo_trace()) LOG("[online] trace TLS handshake on socket %d (host %s)", c->gfd, c->host);
     if (c->fd < 0) return R_NO_SOCKET;
     struct sockaddr_in peer = {0}; socklen_t len = sizeof peer; char ip[INET_ADDRSTRLEN] = "?";
     if (getpeername(c->fd, (struct sockaddr *)&peer, &len) == 0 && peer.sin_family == AF_INET) inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
@@ -132,6 +135,7 @@ static Result c_read(conn_t *c, char *b, uint32_t n, int *out, int consume) {
         if (c->eof) { if (out) *out = 0; return RES_OK; }
         size_t got = 0;
         OSStatus st = consume ? SSLRead(c->tls, b, n, &got) : SSLRead(c->tls, c->peek, sizeof c->peek, &got);
+        if (dmo_trace()) LOG("[online] trace TLS read socket %d: asked %u, got %zu, status %d%s", c->gfd, n, got, (int)st, c->nonblock ? " (non-blocking)" : "");
         if (got) {
             if (!consume) { c->npeek = got; continue; }
             if (out) *out = (int)got;
@@ -150,6 +154,7 @@ static Result c_write(conn_t *c, const char *b, uint32_t n, int *out) {
     OSStatus st = SSLWrite(c->tls, b, n, &put);
     dm_thread_native_wait(0);
     if (st && !put) { LOG("[online] TLS write failed: OSStatus %d", (int)st); return R_RESET; }
+    if (dmo_trace()) LOG("[online] trace TLS write socket %d: %u bytes, %zu sent, status %d", c->gfd, n, put, (int)st);   // sizes only: requests carry the sign-in token
     if (out) *out = (int)put;
     return RES_OK;
 }
@@ -179,6 +184,12 @@ SSF("_ZN2nn3ssl7Context6CreateENS1_10SslVersionE", h_ssl_CtxCreate, void *self, 
 SSF("_ZN2nn3ssl7Context7DestroyEv", h_ssl_CtxDestroy, void *self) { (void)self; return dm_online() ? RES_OK : RES_FAIL; }
 SSF("_ZN2nn3ssl7Context19RegisterInternalPkiEPmNS1_11InternalPkiE", h_ssl_CtxRegPki, void *self, uint64_t *id, int p) { (void)self; (void)p; return dm_online() ? dmo_ssl_import(id) : RES_FAIL; }
 SSF("_ZN2nn3ssl7Context9RemovePkiEm", h_ssl_CtxRemovePki, void *self, uint64_t id) { (void)self; (void)id; return dm_online() ? RES_OK : RES_FAIL; }
+// Smash's libcurl reads the context ID and sets context options before it hands a socket to a connection; left to the SDK they asked the absent
+// ssl service, failed, and curl closed every connection to Nextendo right after connect. The ID is the one Connection::GetContextId reports
+SSF("_ZN2nn3ssl7Context12GetContextIdEPm", h_ssl_CtxId, void *self, uint64_t *id) { (void)self; if (!dm_online()) return RES_FAIL; if (id) *id = 1; return RES_OK; }
+SSF("_ZN2nn3ssl7Context9SetOptionENS1_13ContextOptionEi", h_ssl_CtxOpt, void *self, int o, int v) { (void)self; (void)o; (void)v; return dm_online() ? RES_OK : RES_FAIL; }
+SSF("_ZN2nn3ssl7Context9GetOptionEPiNS1_13ContextOptionE", h_ssl_CtxGetOpt, void *self, int *v, int o) { (void)self; (void)o; if (!dm_online()) return RES_FAIL; if (v) *v = 0; return RES_OK; }
+SSF("_ZN2nn3ssl7Context12AddPolicyOidEPKcj", h_ssl_CtxPolicy, void *self, const char *oid, unsigned n) { (void)self; (void)oid; (void)n; return dm_online() ? RES_OK : RES_FAIL; }
 SSF("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", h_ssl_BiBufSize, uint32_t *o, void *ids, unsigned n) { (void)ids; (void)n; if (o) *o = 0; return RES_FAIL; }
 SSF("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj", h_ssl_BiCerts, void **o, uint8_t *b, unsigned bs, void *ids, unsigned n) { (void)o; (void)b; (void)bs; (void)ids; (void)n; return RES_FAIL; }
 SSF("_ZN2nn3ssl10Connection6CreateEPNS0_7ContextE", h_ssl_CnCreate, void *self, void *ctx) { (void)ctx; return dm_online() ? c_create(self) : RES_FAIL; }
@@ -232,6 +243,26 @@ SSF("_ZN2nn3ssl10Connection4ReadEPcPij", h_ssl_CnRead3, void *self, char *b, int
 SSF("_ZN2nn3ssl10Connection5WriteEPKcPij", h_ssl_CnWrite3, void *self, const char *b, int *o, unsigned n) { ONLINE_CONN(self); if (!c) { if (o) *o = 0; return RES_FAIL; } return c->last = c_write(c, b, n, o); }
 SSF("_ZN2nn3ssl10Connection7PendingEPi", h_ssl_CnPending, void *self, int *n) { ONLINE_CONN(self); if (n) *n = c ? c_pending(c) : 0; return c ? RES_OK : RES_FAIL; }
 SSF("_ZN2nn3ssl10Connection4PollEPNS1_9PollEventES3_j", h_ssl_CnPoll, void *self, uint32_t *o, uint32_t *i, unsigned t) { ONLINE_CONN(self); if (!c) { (void)i; (void)t; return RES_FAIL; } return c_poll(c, o, i, t); }
+// The rest of the connection's surface in Smash 13.0.5's sdk, so none of it falls through to the absent ssl service
+SSF("_ZN2nn3ssl10Connection19GetSessionCacheModeEPNS1_16SessionCacheModeE", h_ssl_CnGetCache, void *self, int *m) { ONLINE_CONN(self); if (!c) return RES_FAIL; if (m) *m = c->cache; return RES_OK; }
+SSF("_ZN2nn3ssl10Connection20SetRenegotiationModeENS1_17RenegotiationModeE", h_ssl_CnReneg, void *self, int m) { (void)m; ONLINE_CONN(self); return c ? RES_OK : RES_FAIL; }
+SSF("_ZN2nn3ssl10Connection20GetRenegotiationModeEPNS1_17RenegotiationModeE", h_ssl_CnGetReneg, void *self, int *m) { ONLINE_CONN(self); if (!c) return RES_FAIL; if (m) *m = 0; return RES_OK; }
+SSF("_ZN2nn3ssl10Connection17FlushSessionCacheEv", h_ssl_CnFlush, void *self) { ONLINE_CONN(self); return c ? RES_OK : RES_FAIL; }
+SSF("_ZN2nn3ssl10Connection29GetNeededServerCertBufferSizeEPj", h_ssl_CnCertSize, void *self, uint32_t *n) { ONLINE_CONN(self); if (!c) return RES_FAIL; if (n) *n = 0; return RES_OK; }   // no certificate is handed back
+SSF("_ZN2nn3ssl10Connection19GetVerifyCertErrorsEPNS_6ResultEPjS4_j", h_ssl_CnVerifyErrs, void *self, uint32_t *r, uint32_t *n, uint32_t *total, unsigned cap) {
+    (void)r; (void)cap; ONLINE_CONN(self); if (!c) return RES_FAIL;
+    if (n) *n = 0;
+    if (total) *total = 0;
+    return RES_OK;
+}
+SSF("_ZN2nn3ssl10Connection19GetServerCertDetailEPNS1_16ServerCertDetailEPKcj", h_ssl_CnCertDetail, void *self, void *d, const char *b, unsigned n) { (void)self; (void)d; (void)b; (void)n; return RES_FAIL; }   // no certificate kept to describe
+// CipherInfo: the cipher's name (64 bytes) and the protocol version (8 bytes)
+SSF("_ZN2nn3ssl10Connection13GetCipherInfoEPNS1_10CipherInfoE", h_ssl_CnCipher, void *self, char *info) {
+    ONLINE_CONN(self); if (!c) return RES_FAIL;
+    if (info) { memset(info, 0, 72); strlcpy(info, "ECDHE-RSA-AES128-GCM-SHA256", 64); strlcpy(info + 64, "TLSv1.2", 8); }
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn3ssl10Connection7PendingEv", "ssl service: offline 0 (cut); online, bytes read ahead", int, h_ssl_CnPending0, void *self) { ONLINE_CONN(self); return c ? c_pending(c) : 0; }
 // The older forms return the byte count, or -1 with the error kept for GetLastError
 HLE_FORCE("_ZN2nn3ssl10Connection4ReadEPcj", "ssl service: offline returns -1 (cut); online, TLS to Nextendo", int, h_ssl_CnRead, void *self, char *b, unsigned n) {
     ONLINE_CONN(self); if (!c) return -1;

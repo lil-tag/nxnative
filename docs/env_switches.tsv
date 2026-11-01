@@ -95,6 +95,7 @@ DM_NEXTENDO_NAT	switch	With `DM_NEXTENDO=1`, the address of Nextendo's NAT check
 DM_NEXTENDO_PID	switch	The Nextendo account number (the game's network service account ID); with `DM_NEXTENDO_TOKEN`, the player is signed in. Wins over the sign-in file
 DM_NEXTENDO_SERVER	switch	With `DM_NEXTENDO=1`, the address Nintendo's server names go to (default Nextendo's main server)
 DM_NEXTENDO_TOKEN	switch	The Nextendo game token (`/api/nex-token`, valid 30 days), carried in the id token's `nnex` claim. Wins over the sign-in file
+DM_NEXTENDO_TRACE	diagnostic	With `DM_NEXTENDO=1`, `1` logs every socket and TLS call with its arguments, result and errno, and the game code that closes a socket (`[online] trace`): where a game's online step stops. Sizes only, never the data
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)

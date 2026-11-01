@@ -43,6 +43,10 @@ static int lx_errno(int e) {
     }
 }
 static long fail(void) { t_err = lx_errno(errno); return -1; }
+// DM_NEXTENDO_TRACE=1: every socket call with its arguments, result and errno (the guest's numbering), to see where a game's online step stops
+int dmo_trace(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NEXTENDO_TRACE"); v = e && *e == '1'; } return v; }
+#define TRACE(...) do { if (dmo_trace()) LOG("[online] trace " __VA_ARGS__); } while (0)
+#define TRACED(r, ...) ({ long r_t = (r); TRACE(__VA_ARGS__); TRACE("  → %ld (errno %d)", r_t, r_t < 0 ? t_err : 0); r_t; })
 static long ok_or_fail(long r) { return r < 0 ? fail() : r; }
 int dmo_errno(void) { return t_err; }
 void dmo_set_errno(int e) { t_err = e; }
@@ -89,10 +93,21 @@ int dmo_socket(int family, int type, int proto) {
     setsockopt(h, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
     if ((type & 0xF) == SOCK_DGRAM) setsockopt(h, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);   // two games on one Mac can share a port (Mush8)
     if (nonblock) fcntl(h, F_SETFL, fcntl(h, F_GETFL) | O_NONBLOCK);
-    return fd_adopt(h);
+    return (int)TRACED(fd_adopt(h), "socket family %d type %#x proto %d", family, type, proto);
+}
+// The game's code on the way to a call (frame pointers; the first few frames in a game module), for the trace
+static void trace_callers(const char *what) {
+    void **fp = __builtin_frame_address(0); char line[512]; int o = snprintf(line, sizeof line, "%s called from", what), found = 0;
+    for (int i = 0; i < 24 && fp && !((uintptr_t)fp & 7) && found < 6; i++) {
+        void *ra = fp[1]; module_t *m = module_of(ra);
+        if (m && o < (int)sizeof line - 40) { o += snprintf(line + o, sizeof line - o, " %s+%#llx", m->name, (unsigned long long)((uint8_t *)ra - m->base)); found++; }
+        void **up = fp[0]; if (up <= fp) break; fp = up;
+    }
+    LOG("[online] trace %s", line);
 }
 int dmo_close(int g) {
     HOST_OR_EBADF(g);
+    if (dmo_trace()) { char w[32]; snprintf(w, sizeof w, "close %d", g); trace_callers(w); }
     atomic_store(&g_fd[g], 0);
     return (int)ok_or_fail(close(h));
 }
@@ -107,7 +122,7 @@ int dmo_connect(int g, const void *a, unsigned n) {
         const struct sockaddr_in *in = (const struct sockaddr_in *)&ss; char ip[INET_ADDRSTRLEN];
         LOG("[online] connect %d to %s:%u", g, inet_ntop(AF_INET, &in->sin_addr, ip, sizeof ip), ntohs(in->sin_port));
     }
-    return (int)ok_or_fail(BLOCKING(connect(h, (struct sockaddr *)&ss, len)));
+    return (int)TRACED(ok_or_fail(BLOCKING(connect(h, (struct sockaddr *)&ss, len))), "connect %d", g);
 }
 int dmo_listen(int g, int backlog) { HOST_OR_EBADF(g); return (int)ok_or_fail(listen(h, backlog)); }
 int dmo_accept(int g, void *a, unsigned *n) {
@@ -120,7 +135,8 @@ int dmo_accept(int g, void *a, unsigned *n) {
 }
 int dmo_sockname(int g, void *a, unsigned *n, int peer) {
     HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sizeof ss;
-    if ((peer ? getpeername(h, (struct sockaddr *)&ss, &len) : getsockname(h, (struct sockaddr *)&ss, &len)) < 0) return (int)fail();
+    if ((peer ? getpeername(h, (struct sockaddr *)&ss, &len) : getsockname(h, (struct sockaddr *)&ss, &len)) < 0) return (int)TRACED(fail(), "%s %d", peer ? "getpeername" : "getsockname", g);
+    TRACE("%s %d → 0", peer ? "getpeername" : "getsockname", g);
     sa_out(a, n, &ss, len);
     return 0;
 }
@@ -134,9 +150,10 @@ int dmo_getsockopt(int g, int level, int opt, void *v, unsigned *n) {
         int64_t *o = v; o[0] = tv.tv_sec; o[1] = tv.tv_usec; *n = 16; return 0;
     }
     socklen_t l = n ? *n : 0;
-    if (getsockopt(h, level, opt, v, &l) < 0) return (int)fail();
+    if (getsockopt(h, level, opt, v, &l) < 0) return (int)TRACED(fail(), "getsockopt %d level %#x opt %#x", g, level, opt);
     if (level == SOL_SOCKET && opt == SO_ERROR && v && l >= 4) *(int *)v = lx_errno(*(int *)v);
     if (n) *n = l;
+    TRACE("getsockopt %d level %#x opt %#x → 0, value %d", g, level, opt, v && l >= 4 ? *(int *)v : -1);
     return 0;
 }
 int dmo_setsockopt(int g, int level, int opt, const void *v, unsigned n) {
@@ -145,26 +162,28 @@ int dmo_setsockopt(int g, int level, int opt, const void *v, unsigned n) {
         const int64_t *i = v; struct timeval tv = {(time_t)i[0], (suseconds_t)i[1]};
         return (int)ok_or_fail(setsockopt(h, level, opt, &tv, sizeof tv));
     }
-    return (int)ok_or_fail(setsockopt(h, level, opt, v, n));
+    return (int)TRACED(ok_or_fail(setsockopt(h, level, opt, v, n)), "setsockopt %d level %#x opt %#x value %d", g, level, opt, v && n >= 4 ? *(const int *)v : -1);
 }
 int dmo_fcntl(int g, int cmd, int arg) {
     HOST_OR_EBADF(g);
-    if (cmd == F_GETFL) { int fl = fcntl(h, F_GETFL); return fl < 0 ? (int)fail() : (fl & O_NONBLOCK ? SW_O_NONBLOCK : 0); }
-    if (cmd == F_SETFL) { int fl = fcntl(h, F_GETFL) & ~O_NONBLOCK; return (int)ok_or_fail(fcntl(h, F_SETFL, fl | (arg & SW_O_NONBLOCK ? O_NONBLOCK : 0))); }
+    if (cmd == F_GETFL) { int fl = fcntl(h, F_GETFL); return (int)TRACED(fl < 0 ? fail() : (fl & O_NONBLOCK ? SW_O_NONBLOCK : 0), "fcntl %d F_GETFL", g); }
+    if (cmd == F_SETFL) { int fl = fcntl(h, F_GETFL) & ~O_NONBLOCK; return (int)TRACED(ok_or_fail(fcntl(h, F_SETFL, fl | (arg & SW_O_NONBLOCK ? O_NONBLOCK : 0))), "fcntl %d F_SETFL %#x", g, arg); }
+    TRACE("fcntl %d cmd %d arg %#x: not handled, → 0", g, cmd, arg);
     return 0;
 }
 long dmo_recvfrom(int g, void *b, unsigned long n, int f, void *a, unsigned *al) {
     HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sizeof ss;
     long r = BLOCKING(recvfrom(h, b, n, msg_flags(f), a ? (struct sockaddr *)&ss : NULL, a ? &len : NULL));
-    if (r < 0) return fail();
+    if (r < 0) return TRACED(fail(), "recv %d n %lu flags %#x", g, n, f);
     if (a) sa_out(a, al, &ss, len);
+    TRACE("recv %d n %lu flags %#x → %ld", g, n, f, r);
     return r;
 }
 long dmo_sendto(int g, const void *b, unsigned long n, int f, const void *a, unsigned al) {
     HOST_OR_EBADF(g);
-    if (!a) return ok_or_fail(BLOCKING(send(h, b, n, msg_flags(f))));
+    if (!a) return TRACED(ok_or_fail(BLOCKING(send(h, b, n, msg_flags(f)))), "send %d n %lu flags %#x", g, n, f);
     struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, al);
-    return ok_or_fail(BLOCKING(sendto(h, b, n, msg_flags(f), (struct sockaddr *)&ss, len)));
+    return TRACED(ok_or_fail(BLOCKING(sendto(h, b, n, msg_flags(f), (struct sockaddr *)&ss, len))), "sendto %d n %lu flags %#x", g, n, f);
 }
 
 // poll: the guest's pollfd is the Mac's; descriptors are translated, a negative one is ignored and an unknown one reports POLLNVAL, as on Horizon
@@ -185,6 +204,7 @@ int dmo_poll(void *fds, uint64_t n, int ms) {
     int e = errno;
     if (q != stack) free(q);
     errno = e;
+    if (dmo_trace()) for (uint64_t i = 0; i < n && i < 8; i++) TRACE("poll fd %d events %#x → revents %#x (timeout %d ms, result %d)", p[i].fd, p[i].events, r >= 0 ? p[i].revents : 0, ms, r);
     return r < 0 ? (int)fail() : r;
 }
 // select through poll: the guest's fd_set is 1024 bits, its timeval {i64 seconds, i64 microseconds} or NULL to wait for good

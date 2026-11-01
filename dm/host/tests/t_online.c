@@ -3,6 +3,7 @@
 #include "../hle_online.c"
 
 void dm_thread_native_wait(int entering) { (void)entering; }
+module_t *module_of(const void *p) { (void)p; return NULL; }   // the trace's caller names (DM_NEXTENDO_TRACE): no game modules here
 
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)

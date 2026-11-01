@@ -9,6 +9,7 @@
 
 module_t *g_mod; int g_nmod;
 void dm_thread_native_wait(int entering) { (void)entering; }
+module_t *module_of(const void *p) { (void)p; return NULL; }   // the trace's caller names (DM_NEXTENDO_TRACE): no game modules here
 static struct { const void *k; void *v; } g_map[64];
 void *objmap_get(const void *k) { for (int i = 0; i < 64; i++) if (g_map[i].k == k) return g_map[i].v; return NULL; }
 void objmap_put(const void *k, void *v) { for (int i = 0; i < 64; i++) if (!g_map[i].k) { g_map[i].k = k; g_map[i].v = v; return; } }
@@ -89,6 +90,10 @@ int main(void) {
     CHECK(g >= 3, "connected to the stand-in");
     static _Alignas(16) uint8_t ctx[0x40], cn[0x40];
     CHECK(h_ssl_CtxCreate(ctx, 1) == RES_OK && h_ssl_CnCreate(cn, ctx) == RES_OK, "context and connection");
+    uint64_t ctxid = 0; int ov = 7;   // Smash's libcurl reads these before the handshake; when they failed it closed every connection
+    CHECK(h_ssl_CtxId(ctx, &ctxid) == RES_OK && ctxid == 1 && h_ssl_CtxOpt(ctx, 1, 1) == RES_OK && h_ssl_CtxGetOpt(ctx, &ov, 1) == RES_OK && !ov && h_ssl_CtxPolicy(ctx, "1.2", 3) == RES_OK, "context ID and options online");
+    char cipher[72]; uint32_t nerr = 9, total = 9;
+    CHECK(h_ssl_CnCipher(cn, cipher) == RES_OK && !strcmp(cipher + 64, "TLSv1.2") && h_ssl_CnVerifyErrs(cn, NULL, &nerr, &total, 0) == RES_OK && !nerr && !total && h_ssl_CnPending0(cn) == 0, "the rest of the connection's surface");
     uint64_t pki = 0; CHECK(dmo_ssl_import(&pki) == RES_OK && pki, "a certificate import is accepted");
     CHECK(h_ssl_CnSock(cn, g) == RES_OK && h_ssl_CnSock(cn, g) == R_IN_USE, "the socket is taken once");
     CHECK(h_ssl_CnHost(cn, "g23380901-lp1.s.n.srv.nintendo.net", 34) == RES_OK, "host name");
