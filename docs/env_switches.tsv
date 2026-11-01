@@ -78,6 +78,7 @@ DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second write
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
+DM_MII_DATABASE	path	The player's Mii database (a Ryujinx `MiiDatabase.dat`, NFDB) that games list before the six default Miis; default `~/Library/Application Support/nxnative/MiiDatabase.dat`, else Ryujinx's own (`hle_mii.c`)
 DM_MOTION	switch	`0` ignores live motion: every six-axis sensor lies flat as before (a shake still plays), and neither controllers' motion sensors nor the phone's device motion are switched on (`hle_hid.c`, `motion_apple.h`, `DmGamepad.m`); the NSP script's `--no-motion` (`MOTION = False`) builds it in
 DM_MOTION_ACC_SIGN	switch	`-1` flips only GameController's acceleration, for a source that reports the specific force (+1 G up at rest) instead of the gravity direction (`motion_fusion.h`); phone and raw HID samples are already in the Switch frame
 DM_MOTION_AXES	switch	`=<map>` such as `x,-z,y`: maps Apple's controller axes to the Switch's, a signed permutation applied to acceleration and rotation alike, for a controller whose axes differ (default `x,y,z`; phone and raw HID samples are already in the Switch frame)
@@ -86,6 +87,14 @@ DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller 
 DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
+DM_NEXTENDO	player	`1` plays online on Nextendo Network: real sockets, name lookups that send Nintendo's server names to Nextendo (`dm/host/hle_online.c`); `0` or unset, offline. The settings list's Nextendo online play
+DM_NEXTENDO_ACCOUNT	path	With `DM_NEXTENDO=1`, the Nextendo sign-in file to read instead of `~/Library/Application Support/nxnative/nextendo.env` (KEY=VALUE lines of the `DM_NEXTENDO_PID`, `_TOKEN`, `_NAME`, `_COUNTRY` switches; `dm/host/hle_online_account.c`)
+DM_NEXTENDO_COUNTRY	switch	The account's country, two letters (the online flag in Mario Kart 8 Deluxe). Wins over the sign-in file
+DM_NEXTENDO_NAME	switch	The Nextendo user name, for the log. Wins over the sign-in file
+DM_NEXTENDO_NAT	switch	With `DM_NEXTENDO=1`, the address of Nextendo's NAT check and of the game servers that live beside it (default Nextendo's)
+DM_NEXTENDO_PID	switch	The Nextendo account number (the game's network service account ID); with `DM_NEXTENDO_TOKEN`, the player is signed in. Wins over the sign-in file
+DM_NEXTENDO_SERVER	switch	With `DM_NEXTENDO=1`, the address Nintendo's server names go to (default Nextendo's main server)
+DM_NEXTENDO_TOKEN	switch	The Nextendo game token (`/api/nex-token`, valid 30 days), carried in the id token's `nnex` claim. Wins over the sign-in file
 DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)
@@ -281,6 +290,7 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
+DM_SYSDATA	path	Folder of system data archives extracted from the player's firmware (`nx_extract --sysdata`), one `<title ID>/` each, mounted read-only; default `~/Library/Application Support/nxnative/sysdata`. Without MiiModel (`0100000000000802`) there, Mii heads draw nothing (`hle_fs.c`)
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment for buffer textures when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy
 DM_TEAM_ID	switch	Apple team ID for the per-game Xcode project, used when `--team-id` / `TEAM_ID` is not given; `build_ipa.sh` uses the placeholder `0000000000` (unsigned) when unset
 DM_TEMP	path	Temporary storage folder (default `$DM_ROOT/run/platform/temp`); stand-in system data goes in `<DM_TEMP>_sysdata`; the Mac launcher, the iOS app and the NSP script set it

@@ -1,16 +1,19 @@
 // Mii service layer (nn::mii::Database, the Mii editor applet). On hardware Database talks to the mii:u service (an IDatabaseService the SDK keeps at Database +0) and AppendMii /
-// ShowMiiEdit start the MiiEdit library applet; the host has neither. It answers as a console with no Mii of its own: the six default Miis, an empty database, and the editor cancelled.
+// ShowMiiEdit start the MiiEdit library applet; the host has neither. It answers as a console whose Mii database is the player's Ryujinx one (mii_db below; none: an empty database),
+// with the six default Miis every console has, and the editor cancelled.
 // Mario Kart 8 Deluxe (SDK 4.4.0) initializes a Database at boot (mii:e and mii:u were the first services it opened itself) and builds 12 random Miis for its title screen's demo race; their
 // heads are drawn by the SDK's Mii rendering code linked into main, from the MiiModel system data (the host's stand-in below, mounted by hle_fs.c MountSystemData).
 // The CharInfo the host builds (0x58 bytes) is the system's default Mii as the mii service's StoreData::BuildDefault makes it: the 3DS-era default parameters, with the colours converted to
 // the Switch's common colour indices (hair 1, eyes 8, mouth 19, glasses 8), a create ID of UUID version 4 (fixed for each default Mii, fresh for a random one) and the nickname "no name";
 // every field is within CharInfoRaw::Verify's ranges (SDK 4.4.0 sdk+0x1b68c8), so CharInfoAccessor::IsValid accepts it.
 #include "hle.h"
+#include <stddef.h>
 #include <sys/stat.h>
 
 uint64_t dm_entropy64(void);
 
-#define MII_RES_NOT_FOUND 0x87Eu        // nn::mii module 126, description 4
+#define MII_RES_NOT_UPDATED 0x67Eu      // nn::mii module 126, description 3: the Mii is already the latest
+#define MII_RES_NOT_FOUND 0x87Eu        // description 4
 #define MII_RES_CANCELED 0xE7Eu         // description 7: the player closed the applet (the SDK's ShowMiiEdit treats it as success)
 #define MII_RES_TEST_MODE 0x1987Eu      // description 204: importing a database needs the system's test mode
 
@@ -49,38 +52,91 @@ static void mii_default(mii_charinfo *c, int gender, int index) {
     c->mole_scale = 4; c->mole_x = 2; c->mole_y = 20;
 }
 
+// The player's Mii database: the NFDB file Ryujinx keeps in system save 8000000000000030 (MiiDatabase.dat, 0x1a98 bytes: "NFDB", 100 StoreData slots of 0x44 bytes, the count at
+// 0x1a95). Read once, from DM_MII_DATABASE, else ~/Library/Application Support/nxnative/MiiDatabase.dat, else Ryujinx's own copy; none (or a malformed file) is an empty database.
+// StoreData keeps the CharInfo fields as bitfields of its first 0x1c bytes (mii_core: byte, shift, width per CharInfo byte from font_region on, the table Mush8 uses, services/mii.rs),
+// the nickname at 0x1c and the create ID at 0x30; the eyebrow Y is stored minus 3
+enum { MII_NFDB_SIZE = 0x1a98, MII_STORE = 0x44, MII_DB_MAX = 100 };
+static const uint8_t mii_core[49][3] = {
+    {10,6,2},{21,0,4},{4,7,1},{1,0,7},{2,0,7},{3,7,1},{9,6,2},{21,4,4},{22,0,4},{22,4,4},{23,0,4},{0,0,8},{3,0,7},{2,7,1},{9,0,6},{4,0,7},{18,5,3},{17,5,3},{16,5,3},{23,4,4},
+    {11,0,5},{12,0,5},{5,0,7},{24,0,4},{15,5,3},{24,4,4},{25,0,4},{25,4,4},{13,0,5},{26,0,4},{14,0,5},{10,0,6},{6,0,7},{26,4,4},{14,5,3},{15,0,5},{7,0,7},{13,5,3},{12,5,3},{27,0,4},
+    {16,0,5},{20,0,5},{8,0,7},{11,5,3},{17,0,5},{1,7,1},{27,4,4},{18,0,5},{19,0,5}};
+_Static_assert(offsetof(mii_charinfo, mole_y) - offsetof(mii_charinfo, font_region) == 48, "mii_core covers font_region .. mole_y");
+static void mii_from_store(mii_charinfo *c, const uint8_t *s) {
+    memset(c, 0, sizeof *c);
+    memcpy(c->create_id, s + 0x30, 16); memcpy(c->nickname, s + 0x1c, 20);
+    uint8_t *f = &c->font_region;
+    for (int i = 0; i < 49; i++) f[i] = (uint8_t)((s[mii_core[i][0]] >> mii_core[i][1]) & ((1u << mii_core[i][2]) - 1));
+    c->eyebrow_y += 3;
+}
+static mii_charinfo g_mii_db[MII_DB_MAX]; static int g_mii_n;
+int dm_mii_parse(const uint8_t *d, size_t n) {   // the NFDB file into g_mii_db; the count, 0 for a file that is not one
+    g_mii_n = 0;
+    if (n < MII_NFDB_SIZE || memcmp(d, "NFDB", 4)) return 0;
+    int k = d[MII_NFDB_SIZE - 3] < MII_DB_MAX ? d[MII_NFDB_SIZE - 3] : MII_DB_MAX;
+    for (int i = 0; i < k; i++) mii_from_store(&g_mii_db[i], d + 4 + i * MII_STORE);
+    return g_mii_n = k;
+}
+static void mii_db_load(void) {
+    char p[1024]; const char *e = getenv("DM_MII_DATABASE"), *home = getenv("HOME");
+    const char *tries[] = {"%s/Library/Application Support/nxnative/MiiDatabase.dat", "%s/Library/Application Support/Ryujinx/bis/system/save/8000000000000030/0/MiiDatabase.dat"};
+    for (int i = -1; i < 2; i++) {
+        if (i < 0) { if (!e || !*e) continue; strlcpy(p, e, sizeof p); }
+        else if (!home || snprintf(p, sizeof p, tries[i], home) >= (int)sizeof p) continue;
+        FILE *f = fopen(p, "rb"); if (!f) continue;
+        static uint8_t b[MII_NFDB_SIZE]; size_t n = fread(b, 1, sizeof b, f); fclose(f);
+        if (dm_mii_parse(b, n)) { LOG("mii: %d Mii(s) from %s", g_mii_n, p); return; }
+        LOG("[RED] mii: %s is not a Mii database (NFDB) file", p);
+        if (i < 0) return;   // the file named in DM_MII_DATABASE, or none
+    }
+    LOG("mii: no Mii database (DM_MII_DATABASE, nxnative's or Ryujinx's): only the six default Miis");
+}
+static void mii_db(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, mii_db_load); }
+static int mii_find(const void *info) {   // database index of the Mii with this create ID (CharInfo starts with it), or -1
+    mii_db();
+    for (int i = 0; info && i < g_mii_n; i++) if (!memcmp(g_mii_db[i].create_id, info, 16)) return i;
+    return -1;
+}
+
 // The object keeps its service pointer at +0, which the constructor zeroes and the destructor releases through its vtable when set; the host never sets it
-HLE_FORCE("_ZN2nn3mii8Database10InitializeEv", "mii:u service; the host's database: the six default Miis, none of the console's own", Result, h_mii_Init, void *self) {
-    (void)self; LOG("mii: Database::Initialize (the six default Miis, none of the console's own)"); return RES_OK;
+HLE_FORCE("_ZN2nn3mii8Database10InitializeEv", "mii:u service; the host's database: the player's Ryujinx Miis and the six default ones", Result, h_mii_Init, void *self) {
+    (void)self; mii_db(); return RES_OK;
 }
 HLE_FORCE("_ZN2nn3mii8Database8FinalizeEv", "mii:u service; nothing to release", void, h_mii_Fin, void *self) { (void)self; }
 HLE_FORCE("_ZNK2nn3mii8Database11IsAvailableEv", "mii:u service; always available", int, h_mii_Avail, const void *self) { (void)self; return 1; }
-HLE_FORCE("_ZN2nn3mii8Database9IsUpdatedEi", "mii:u service; the empty database never changes", int, h_mii_Updated, void *self, int src) { (void)self; (void)src; return 0; }
-HLE_FORCE("_ZNK2nn3mii8Database14IsFullDatabaseEv", "mii:u service; empty, so not full", int, h_mii_Full, const void *self) { (void)self; return 0; }
-// Source flags: 1 the console's database (empty here), 2 the six default Miis every console has. Mario Kart 8 Deluxe asks for the defaults with room for 6 and never reads the count
-// (main+0x81e954): its boot-time list of Mii icons (main+0x419dc8) builds a head for each of the six, and zeroed entries failed the model's CharInfo check
+HLE_FORCE("_ZN2nn3mii8Database9IsUpdatedEi", "mii:u service; the database is read once and never changes", int, h_mii_Updated, void *self, int src) { (void)self; (void)src; return 0; }
+HLE_FORCE("_ZNK2nn3mii8Database14IsFullDatabaseEv", "mii:u service; full at 100 Miis", int, h_mii_Full, const void *self) { (void)self; mii_db(); return g_mii_n >= MII_DB_MAX; }
+// Source flags: 1 the console's database (the player's Miis), 2 the six default Miis every console has; with both, the database comes first, as on the console. Mario Kart 8 Deluxe asks for
+// the defaults with room for 6 and never reads the count (main+0x81e954): its boot-time list of Mii icons (main+0x419dc8) builds a head for each of the six, and zeroed entries failed the
+// model's CharInfo check
 enum { MII_SRC_DATABASE = 1, MII_SRC_DEFAULT = 2, MII_DEFAULTS = 6 };
 static int mii_get(void *buf, int n, int src, size_t stride) {
-    int k = 0;
-    for (; (src & MII_SRC_DEFAULT) && buf && k < n && k < MII_DEFAULTS; k++) {
+    mii_db();
+    int k = 0, db = src & MII_SRC_DATABASE ? g_mii_n : 0, all = db + (src & MII_SRC_DEFAULT ? MII_DEFAULTS : 0);
+    for (; buf && k < n && k < all; k++) {
         uint8_t *e = (uint8_t *)buf + (size_t)k * stride;
-        mii_default((mii_charinfo *)e, k >= 3, k);
-        if (stride > sizeof(mii_charinfo)) { uint32_t source = 1; memcpy(e + sizeof(mii_charinfo), &source, 4); }   // CharInfoElement: the CharInfo and its source (1 = default)
+        if (k < db) memcpy(e, &g_mii_db[k], sizeof(mii_charinfo)); else mii_default((mii_charinfo *)e, k - db >= 3, k - db);
+        if (stride > sizeof(mii_charinfo)) { uint32_t source = k >= db; memcpy(e + sizeof(mii_charinfo), &source, 4); }   // CharInfoElement: the CharInfo and its source (0 database, 1 default)
     }
     return k;
 }
-HLE_FORCE("_ZNK2nn3mii8Database8GetCountEi", "mii:u service; the six default Miis", int, h_mii_Count, const void *self, int src) { (void)self; return src & MII_SRC_DEFAULT ? MII_DEFAULTS : 0; }
-HLE_FORCE("_ZN2nn3mii8Database3GetEPiPNS0_15CharInfoElementEii", "mii:u service; the six default Miis", Result, h_mii_GetE, void *self, int *out, void *buf, int n, int src) {
+HLE_FORCE("_ZNK2nn3mii8Database8GetCountEi", "mii:u service; the player's Miis and the six default ones", int, h_mii_Count, const void *self, int src) {
+    (void)self; mii_db(); return (src & MII_SRC_DATABASE ? g_mii_n : 0) + (src & MII_SRC_DEFAULT ? MII_DEFAULTS : 0);
+}
+HLE_FORCE("_ZN2nn3mii8Database3GetEPiPNS0_15CharInfoElementEii", "mii:u service; the player's Miis and the six default ones", Result, h_mii_GetE, void *self, int *out, void *buf, int n, int src) {
     (void)self; *out = mii_get(buf, n, src, sizeof(mii_charinfo) + 4); return RES_OK;
 }
-HLE_FORCE("_ZN2nn3mii8Database3GetEPiPNS0_8CharInfoEii", "mii:u service; the six default Miis", Result, h_mii_Get, void *self, int *out, void *buf, int n, int src) {
+HLE_FORCE("_ZN2nn3mii8Database3GetEPiPNS0_8CharInfoEii", "mii:u service; the player's Miis and the six default ones", Result, h_mii_Get, void *self, int *out, void *buf, int n, int src) {
     (void)self; *out = mii_get(buf, n, src, sizeof(mii_charinfo)); return RES_OK;
 }
-HLE_FORCE("_ZNK2nn3mii8Database8GetIndexEPiRKNS0_8CharInfoE", "mii:u service; no Mii is in the database", Result, h_mii_Index, const void *self, int *out, const void *info) {
-    (void)self; (void)info; *out = -1; return MII_RES_NOT_FOUND;
+HLE_FORCE("_ZNK2nn3mii8Database8GetIndexEPiRKNS0_8CharInfoE", "mii:u service; the Mii's place in the player's database", Result, h_mii_Index, const void *self, int *out, const void *info) {
+    (void)self; *out = mii_find(info); return *out < 0 ? MII_RES_NOT_FOUND : RES_OK;
 }
-HLE_FORCE("_ZNK2nn3mii8Database12UpdateLatestEPNS0_8CharInfoEi", "mii:u service; no Mii is in the database", Result, h_mii_Latest, const void *self, void *info, int src) {
-    (void)self; (void)info; (void)src; return MII_RES_NOT_FOUND;
+HLE_FORCE("_ZNK2nn3mii8Database12UpdateLatestEPNS0_8CharInfoEi", "mii:u service; the database's copy of the Mii", Result, h_mii_Latest, const void *self, void *info, int src) {
+    (void)self; int i = src & MII_SRC_DATABASE ? mii_find(info) : -1;
+    if (i < 0) return MII_RES_NOT_FOUND;
+    if (!memcmp(info, &g_mii_db[i], sizeof(mii_charinfo))) return MII_RES_NOT_UPDATED;   // as the mii service and Ryujinx answer an unchanged Mii
+    memcpy(info, &g_mii_db[i], sizeof(mii_charinfo)); return RES_OK;
 }
 // RandomDesc {age, gender, race}: gender 0 male, 1 female, 2 either. The host's "random" Mii is the default one of that gender
 HLE_FORCE("_ZN2nn3mii8Database11BuildRandomEPNS0_8CharInfoERKNS0_10RandomDescE", "mii:u service; the default Mii", Result, h_mii_Random, void *self, mii_charinfo *out, const int *desc) {
