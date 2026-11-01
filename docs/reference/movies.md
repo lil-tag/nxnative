@@ -32,6 +32,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** both forms are taken over now (`hle_movie.c`).
 - **Found on:** [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) (SDK 4.5.0; one boot).
 
+### `movie::Decoder` base-object constructors
+
+- **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` (`pc=0 lr=h_movie_Configure+…`) at the first movie, with the SDK 4 constructor already taken over.
+- **Cause:** Mario Tennis Aces (SDK 4.5.0) imports the base-object constructor (C2, `_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE`), not the complete-object one (C1) the host took over, so the SDK built its own decoder.
+- **Fix:** both C2 forms (with and without a priority) are taken over like their C1 forms (`hle_movie.c`); for a class without virtual bases they do the same.
+- **Found on:** Mario Tennis Aces 3.1.0 (SDK 4.5.0).
+
 ### SDK 3's `movie::Decoder` constructor takes a type and a format only
 
 - **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` (`pc=0 lr=h_movie_Configure+…`) when the first movie starts; with only the constructor taken over, `[RED] movie: decoder type 1 output 3 mode 1 not supported by the host`.

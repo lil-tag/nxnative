@@ -204,6 +204,13 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md). Found with a check that reports a bind record holding more than 32 handles (`[RED] bind record … overwritten after recording`), then `DM_PROBE_WATCH` on that word.
 - **Note:** any other command a game patches this way needs the same: find the readers of the `GetCommandMemoryUsed` slot first.
 
+### `CopyCommands` copies the records
+
+- **Symptom:** Mario Tennis Aces' 3D scene is black in a match and at the character select: only the HUD, post-effects and the movie quad draw, and no program from `/model/…` is bound.
+- **Cause:** `nvnCommandBufferCopyCommands` recorded a CALL to the source, as `CallCommands` does. Aces records each model's draw into one scratch buffer and copies it into the model's prerecorded list; with a CALL every model list called the scratch buffer, which by then held the title movie's quad.
+- **Fix** (`hle_nvn.c`): `CopyCommands` copies the source's records, following its JUMPs up to its END; `CallCommands` still records a CALL. The game sizes each destination exactly at the source's `GetCommandMemoryUsed` (records + END) with a null memory callback, so a copied record keeps room for the END only, not for a JUMP; `cmd_new_segment` logs `[RED] command memory: a JUMP … needs 16 bytes` if one is ever needed there. `t_nvn` section 5b.
+- **Found on:** Mario Tennis Aces 3.1.0 (from sen-6ei/nxnative#1's bring-up of 3.1.1).
+
 ## Queues and syncs
 
 ### Bindings belong to each queue

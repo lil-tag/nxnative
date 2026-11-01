@@ -2103,6 +2103,74 @@ def sarc_members(d, label='SARC'):
         nm = d[names + (attr & 0xffffff) * 4:].split(b'\0')[0].decode('utf-8', 'replace') if attr >> 24 else f'#{i}'
         yield nm, d[doff + s:doff + e]
 
+NARC = b'NARC'
+
+def camelot_lz(d, at, n, label):
+    """Camelot's LZ (Mario Tennis Aces 3.1.0 main+0x20b4d8), the data from `at` → n bytes. A flag byte, negated, gives eight tokens from its top bit: 0 a literal byte, 1 a match
+    of two bytes: low nibble of the first the length, the rest the distance back (12 bits; 0 ends the data). Length 0 takes one more byte (16 + it), length 1 two more
+    (17 + the byte + (the next << 8 | 0xff)); a flag byte of 0 is eight literals"""
+    out = bytearray(); end = len(d)
+    while at < end:
+        flags = -d[at] & 0xff; at += 1
+        for bit in range(7, -1, -1):
+            if not flags >> bit & 1:
+                out.append(d[at]); at += 1; continue
+            b0, b1 = d[at], d[at + 1]
+            dist, k = b0 >> 4 | b1 << 4, b0 & 0xf
+            if not dist:
+                if len(out) != n: red(f'{label}: Camelot LZ data holds {len(out):#x} bytes, its header says {n:#x}')
+                return bytes(out)
+            if k > 1: at += 2
+            elif k == 0: k = 0x10 + d[at + 2]; at += 3
+            else: k = 0x11 + d[at + 2] + (d[at + 3] << 8 | 0xff); at += 4
+            if dist > len(out) or len(out) + k > n: red(f'{label}: Camelot LZ match {dist:#x} back, {k:#x} bytes at {len(out):#x} of {n:#x}')
+            s = len(out) - dist
+            if dist >= k: out += out[s:s + k]
+            else:
+                for i in range(k): out.append(out[s + i])
+            if at >= end: break
+    if len(out) != n: red(f'{label}: Camelot LZ data holds {len(out):#x} bytes, its header says {n:#x}')
+    return bytes(out)
+
+def camelot_member(m, label):
+    """A member of Camelot's NARC archives, unpacked as the game does (Mario Tennis Aces 3.1.0 main+0x20c3a4): its first byte names the form. 0x10 / 0x20 zlib, 0x30 raw deflate,
+    0x70 / 0x80 stored, each after a 16-byte header with the size big-endian at +1; 0x50 Camelot LZ after 8 bytes, the size big-endian at +4; 0x94 an LZ4 block after 8 bytes,
+    the size little-endian at +4; any other first byte: the member as it is"""
+    if len(m) < 8: return m
+    c = m[0]
+    if c in (0x10, 0x20, 0x30, 0x70, 0x80):
+        n = int.from_bytes(m[1:5], 'big')
+        if c >= 0x70: return m[16:16 + n]
+        out = zlib.decompressobj(-15 if c == 0x30 else 15).decompress(m[16:], n)
+        if len(out) != n: red(f'{label}: a zlib member of {len(out):#x} bytes, its header says {n:#x}')
+        return out
+    if c == 0x50: return camelot_lz(m, 8, int.from_bytes(m[4:8], 'big'), label)
+    if c == 0x94:
+        import lz4.block
+        return lz4.block.decompress(m[8:], uncompressed_size=struct.unpack_from('<i', m, 4)[0])
+    return m
+
+def narc_members(d, label):
+    """(name, bytes) of each member of a Nitro archive (Camelot's .narc / .ntex / .nptl and model .bin files in Mario Tennis Aces): header (size u16 at +0xc, section count at +0xe),
+    then BTAF (+8 member count, +0xc a start and end per member, from the GMIF data), BTNF (the names, not read: members are numbered) and GMIF (its data after 8 bytes).
+    Each member is unpacked by its first byte (camelot_member); members may not reach past the data, and may expand at most 256 times (Aces' textures: up to about 105)"""
+    hl, ns = field(d, '<HH', 12, f'{label} NARC header'); o = hl; secs = {}
+    for _ in range(ns):
+        tag, sz = d[o:o + 4], field(d, '<I', o + 4, f'{label} NARC section')[0]
+        if sz < 8: red(f'{label}: NARC section {tag!r} of {sz} bytes at {o:#x}')
+        secs[tag] = (o, sz); o += sz
+    if b'BTAF' not in secs or b'GMIF' not in secs: red(f'{label}: NARC without {"BTAF" if b"BTAF" not in secs else "GMIF"}')
+    fo, (go, gsz) = secs[b'BTAF'][0], secs[b'GMIF']
+    n = field(d, '<H', fo + 8, f'{label} BTAF')[0]; g0, glen = go + 8, min(gsz, len(d) - go) - 8
+    for i in range(n):
+        s, e = field(d, '<II', fo + 12 + 8 * i, f'{label} BTAF entry')
+        if not s <= e <= glen: red(f'{label}: NARC member {i} at {s:#x}..{e:#x} lies outside its {glen:#x} bytes of data')
+        m = d[g0 + s:g0 + e]
+        if len(m) >= 8 and m[0] in (0x10, 0x20, 0x30, 0x50, 0x70, 0x80, 0x94):
+            size = int.from_bytes(m[4:8], 'big') if m[0] == 0x50 else struct.unpack_from('<i', m, 4)[0] if m[0] == 0x94 else int.from_bytes(m[1:5], 'big')
+            if not 0 <= size <= 256 * len(m): red(f'{label}: NARC member {i} of {len(m):#x} bytes says it holds {size:#x}')
+        yield f'#{i}', camelot_member(m, f'{label}#{i}')
+
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
 COMMON, TREES = None, {}   # Unity common strings and borrowed type trees (given when the pool starts)
 ZDICTS, _ZD = {}, {}       # zstd dictionaries by ID (given when the pool starts) and their digested form in this process
@@ -2563,6 +2631,13 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SCNE:   # a Bezel Engine archive (bea_members): each entry scanned as a file of its own (the shaders are BNSH in its .bfsha entries)
         for nm, m in bea_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}/{nm}', found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == NARC:   # a Camelot Nitro archive (narc_members): its effects, models, layouts and system shaders hold BNSH in packed members (Mario Tennis Aces)
+        def scan_narc(d, label, depth=0):
+            for nm, m in narc_members(d, label):
+                if m[:4] == NARC and depth < NEST: scan_narc(m, label + nm, depth + 1)
+                else: scan_blob(m, label + nm, found)
+        scan_narc(open(path, 'rb').read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] == GFPAK:   # a Game Freak archive (gfpak_members): each entry scanned as a file of its own (the shaders are BNSH entries)
         for nm, m in gfpak_members(open(path, 'rb').read(), '/' + rel): scan_blob(m, f'/{rel}{nm}', found)

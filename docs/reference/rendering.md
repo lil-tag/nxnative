@@ -27,6 +27,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md); [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): the opening movie's YUV conversion uses GEQUAL against a new 1920×1080 depth texture that the game never clears. Metal supplied depth 1, discarding the movie; zero initialization restores it without a shader override.
 - **Check:** `t_clear_ds` poisons depth and stencil before calling the real initializer and checks both become zero; depth clear, stencil-view and upload-budget tests cover the related paths.
 
+### sRGB and linear textures over the same storage
+
+- **Symptom:** a match in Mario Tennis Aces shows the HUD on black; a texture dump shows the whole scene in the 1080p composite target.
+- **Cause:** the composite writes the scene into an `RGBA8_SRGB` (0x38) target and the anti-aliasing pass reads the same storage as `RGBA8` (0x25). The sharing table keys textures by pool, offset and description, the format among them, so the `RGBA8` texture was a second, empty Metal texture.
+- **Fix** (`nvn_mtl.m`): a texture whose key differs from a shared one only by the other half of an sRGB / linear pair (RGBA8, BGRA8, BC1–3, BC7) becomes a view of that texture in its own format (`alias_twin`; such views need no format-view usage). The viewed texture is not taken over while a view of it is shared (`alias_viewed`), since a view is not resident by itself, and an upgrade asked through a view upgrades the texture it views; the upgrade moves every view to a view of the new texture (`tex_upgrade`). `dm/gfx/tests/t_srgb_twin.m`.
+- **Found on:** Mario Tennis Aces 3.1.0.
+
 ### Texture swizzle through swizzled Metal views
 
 - **Symptom:** glyphs render as white boxes (the font atlas is `(1, 1, 1, R)`).

@@ -83,6 +83,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `shader_split.py` `gfpak_members` reads the BNSH entries of GFPAK archives (LZ4 entries, [01](../agents/01-extract.md)).
 - **Found on:** [Pokémon Sword](../../dm/games/0100ABF008968000/README.md): 41,516 shaders, nearly all BNSH entries of the 7,699 GFPAK archives under `bin/archive` (the models' and effects' shader archives), beside loose BNSH files (`bin/battle/waza/model/**/*.bnsh_vsh` / `_fsh`, `bin/graphics`, `system_resource/shader`) and two in `main`. The YEBIS shaders it also draws are in `main` ([Shaders in a zlib stream in main](#shaders-in-a-zlib-stream-in-main-yebis-tfxo)).
 
+### Shaders in Camelot's Nitro archives
+
+- **Symptom:** `[RED] shader … is not in the shader map` in Mario Tennis Aces' first minutes: the split found 1,390 shaders, only the loose `.bnsh` / `.bfsha` files.
+- **Cause:** effects (`.nptl`), models, textures (`.ntex`), layouts and system shaders are NARC archives (`NARC`, `BTAF` member table, `BTNF` names, `GMIF` data) whose members carry Camelot's compression headers. The game reads a member in `main+0x20c3a4` (3.1.0) by its first byte: 0x10 / 0x20 zlib and 0x30 raw deflate after 16 bytes, the size big-endian at +1; 0x50 Camelot's LZ after 8 bytes, the size big-endian at +4 (`main+0x20b4d8`); 0x70 / 0x80 stored after 16 bytes; 0x94 an LZ4 block after 8 bytes, the size little-endian at +4; any other byte means stored. 3.1.0's RomFS holds 13,401 members of 0x30, 1,169 of 0x50, 370 of 0x20 and 2 of 0x94.
+- **Fix:** `narc_members` / `camelot_member` / `camelot_lz` in `shader_split.py` read the archives and unpack each member before the scan; members must lie in the data and may expand at most 256 times. 21,664 shaders in 3.1.0, none unreadable (`dm/tools/tests/test_split_narc.py`).
+- **Found on:** Mario Tennis Aces 3.1.0.
+
 ### Oodle entries of GFPAK archives
 
 - **Symptom:** the split counts hundreds of files as unreadable (678 on Pokémon Legends: Arceus), each with `[RED] <file>.gfpak: entry 0 has compression 3 (Oodle), which this reader does not decode`, and leaves their shaders out.

@@ -1734,6 +1734,11 @@ enum { ALIAS_IDLE = 16 };
 static uint64_t g_alias_taken;   // shared textures evicted when another texture took over their storage (for the memory report)
 static nvn_hmap g_ghost;   // defined below (finalized texture serials)
 static int serial_holds(nvn_hmap *m, id o) { for (uint32_t i = 0; i < m->cap; i++) if (m->vals[i] == (__bridge void *)o) return 1; return 0; }
+// A shared texture another entry views in its own format (alias_twin): kept while the view is in the table, since a view is not resident by itself. Caller holds g_smu
+static int alias_viewed(id o) {
+    for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && ((__bridge id<MTLTexture>)g_alias.vals[i]).parentTexture == o) return 1;
+    return 0;
+}
 static void alias_take_over(const alias_key *nk) {
     nvn_texlayout L; nvn_tex_layout(&nk->d, &L);
     if (!L.size) return;
@@ -1745,7 +1750,7 @@ static void alias_take_over(const alias_key *nk) {
         if (k.pool != nk->pool || !memcmp(&k, nk, sizeof k) || k.off >= hi) continue;
         nvn_texlayout kl; nvn_tex_layout(&k.d, &kl);
         uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
-        if (k.off + (int64_t)kl.size <= lo || (seen && g_fence + 1 - seen < ALIAS_IDLE) || serial_holds(&g_by_serial, (__bridge id)g_alias.vals[i])) continue;
+        if (k.off + (int64_t)kl.size <= lo || (seen && g_fence + 1 - seen < ALIAS_IDLE) || serial_holds(&g_by_serial, (__bridge id)g_alias.vals[i]) || alias_viewed((__bridge id)g_alias.vals[i])) continue;
         ks[n++] = k;
     }
     for (uint32_t j = 0; j < n; j++) {
@@ -1959,6 +1964,11 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextureUsage add, MTLPixelFormat view_pf) {
+    if (base.parentTexture && alias_has(base)) {   // an sRGB / linear twin view (alias_twin): the texture it views is upgraded, and the walk below moves this view to a view of the new one
+        tex_upgrade(NULL, base.parentTexture, add, view_pf);
+        id<MTLTexture> v = tex_get(t->serial);
+        return [v respondsToSelector:@selector(parentTexture)] ? v : base;
+    }
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.textureType = base.textureType; d.pixelFormat = base.pixelFormat; d.width = base.width; d.height = base.height; d.depth = base.depth;   // Keep the original format, only add the format-view usage
     d.arrayLength = base.arrayLength; d.mipmapLevelCount = base.mipmapLevelCount; d.sampleCount = base.sampleCount;
@@ -1967,7 +1977,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextur
     // A linear texture aliases the guest pool. Adding usage must keep that backing: a new standalone texture copies the old pixels once, but later GPU writes never reach the CPU map.
     id<MTLBuffer> backing = base.buffer;
     id<MTLTexture> upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
-    if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
+    if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t ? t->serial : 0, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
     res_add(upgraded);
     id<MTL4ComputeCommandEncoder> b = backing ? nil : blit();   // shared backing already contains the pixels; copying it onto itself would overlap
     NSUInteger slices = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
@@ -1978,7 +1988,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextur
         else for (NSUInteger s = 0; s < slices; s++)
             enc_b_copy_texture(b, base, s, l, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), upgraded, s, l, MTLOriginMake(0, 0, 0));
     }
-    id holder = tex_get(t->serial);
+    id holder = t ? tex_get(t->serial) : nil;   // t = NULL: the texture a twin view views (above), registered under other serials only
     if ([holder isKindOfClass:[NvPkg class]]) { id<MTLTexture> old = ((NvPkg *)holder)->tex; ((NvPkg *)holder)->tex = upgraded; defer_obj_release(old); g_ser_gen++;
         if (((NvPkg *)holder)->view) { defer_obj_unref(((NvPkg *)holder)->view); ((NvPkg *)holder)->view = nil; ((NvPkg *)holder)->vbase = 0; } }   // a sparse texture's view of the old one: bound whole until its next upload
     else {
@@ -1987,22 +1997,34 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> base, MTLTextur
         // the old texture is retired once the submissions that used it complete, the view caches follow g_ser_gen (PR #107)
         pthread_mutex_lock(&g_smu);
         nvn_hmap *tables[] = {&g_by_serial, &g_ghost}; int named = 0, shared = 0;
+        NSMapTable *moved = [NSMapTable strongToStrongObjectsMapTable];   // twin views of the old texture (alias_twin) → the same view of the upgraded one, made once each
+        id (^move)(id) = ^id(id v) {
+            if (![v respondsToSelector:@selector(parentTexture)] || ((id<MTLTexture>)v).parentTexture != base) return nil;
+            id nv = [moved objectForKey:v];
+            if (!nv) { nv = [upgraded newTextureViewWithPixelFormat:((id<MTLTexture>)v).pixelFormat]; if (!nv) return nil; [moved setObject:nv forKey:v];
+                if (CFSetContainsValue(g_alias_set, (__bridge const void *)v)) { CFSetRemoveValue(g_alias_set, (__bridge const void *)v); CFSetAddValue(g_alias_set, (__bridge const void *)nv); } }
+            return nv;
+        };
         for (unsigned j = 0; j < 2; j++) for (uint32_t i = 0; i < tables[j]->cap; i++) {
-            if (tables[j]->vals[i] != (__bridge void *)base) continue;
+            if (!tables[j]->vals[i]) continue;
+            id nv = tables[j]->vals[i] == (__bridge void *)base ? nil : move((__bridge id)tables[j]->vals[i]);
+            if (tables[j]->vals[i] != (__bridge void *)base && !nv) continue;
             uint64_t serial; memcpy(&serial, tables[j]->keys + (size_t)i * tables[j]->klen, sizeof serial);
-            void *old = tables[j]->vals[i]; tables[j]->vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); named |= serial == t->serial;
+            void *old = tables[j]->vals[i]; tables[j]->vals[i] = (void *)CFBridgingRetain(nv ?: upgraded); if (nv) defer_obj_unref(CFBridgingRelease(old)); else CFRelease(old); named |= t && serial == t->serial;
         }
         for (uint32_t i = 0; i < g_alias.cap; i++) {
-            if (g_alias.vals[i] != (__bridge void *)base) continue;
-            void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); shared = 1;
+            if (!g_alias.vals[i]) continue;
+            id nv = g_alias.vals[i] == (__bridge void *)base ? nil : move((__bridge id)g_alias.vals[i]);
+            if (g_alias.vals[i] != (__bridge void *)base && !nv) continue;
+            void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(nv ?: upgraded); if (nv) defer_obj_unref(CFBridgingRelease(old)); else { CFRelease(old); shared = 1; }
         }
         if (shared) { CFSetRemoveValue(g_alias_set, (__bridge const void *)base); CFSetAddValue(g_alias_set, (__bridge const void *)upgraded); }
         g_ser_gen++;
         pthread_mutex_unlock(&g_smu);
-        if (!named) tex_put(t->serial, upgraded);
+        if (!named && t) tex_put(t->serial, upgraded);
         defer_obj_release(base);
     }
-    MLOG("texture upgraded to allow %s ser=%llu base format %lu → view format %lu (upgrades=%llu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
+    MLOG("texture upgraded to allow %s ser=%llu base format %lu → view format %lu (upgrades=%llu)", add & MTLTextureUsageShaderWrite ? "image writes" : add & MTLTextureUsageRenderTarget ? "render-target use" : "format views", t ? t->serial : 0, (unsigned long)base.pixelFormat, (unsigned long)view_pf, ++g_pfv_upgrades);
     return upgraded;
 }
 static id<MTLTexture> tex_upgrade_pfv(const tex_t *t, id<MTLTexture> base, MTLPixelFormat view_pf) { return tex_upgrade(t, base, MTLTextureUsagePixelFormatView, view_pf); }
@@ -2649,6 +2671,36 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
     }
     return mt;
 }
+// The sRGB and linear forms of one format (MTLPixelFormat values): a view between them needs no PixelFormatView usage
+static int srgb_twin(MTLPixelFormat a, MTLPixelFormat b) {
+    static const MTLPixelFormat pairs[][2] = {{MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA8Unorm_sRGB}, {MTLPixelFormatBGRA8Unorm, MTLPixelFormatBGRA8Unorm_sRGB},
+        {MTLPixelFormatBC1_RGBA, MTLPixelFormatBC1_RGBA_sRGB}, {MTLPixelFormatBC2_RGBA, MTLPixelFormatBC2_RGBA_sRGB}, {MTLPixelFormatBC3_RGBA, MTLPixelFormatBC3_RGBA_sRGB},
+        {MTLPixelFormatBC7_RGBAUnorm, MTLPixelFormatBC7_RGBAUnorm_sRGB}};
+    for (unsigned i = 0; i < sizeof pairs / sizeof *pairs; i++) if ((a == pairs[i][0] && b == pairs[i][1]) || (a == pairs[i][1] && b == pairs[i][0])) return 1;
+    return 0;
+}
+// A texture over the storage and description of a shared one but for the other half of an sRGB / linear pair: a view of that texture in its own format, not a second, empty texture.
+// Mario Tennis Aces composites its 3D scene into an RGBA8_SRGB (0x38) target and its anti-aliasing pass reads the same storage as RGBA8 (0x25); the sharing table keys the format,
+// so the RGBA8 texture was a new one and a match showed the HUD on black. Views of views are not made: the twin must be a texture of its own
+static id<MTLTexture> alias_twin(const alias_key *ak) {
+    uint32_t pf = 0; uint8_t swz[4];
+    if (!nvn_fmt_to_mtl(ak->d.format, &pf, swz) || !pf) return nil;
+    pthread_mutex_lock(&g_smu);
+    id<MTLTexture> tw = nil;
+    for (uint32_t i = 0; i < g_alias.cap && !tw; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (k.pool != ak->pool || k.off != ak->off || k.d.format == ak->d.format) continue;
+        k.d.format = ak->d.format; if (memcmp(&k, ak, sizeof k)) continue;
+        id<MTLTexture> o = (__bridge id<MTLTexture>)g_alias.vals[i];
+        if (!o.parentTexture && !o.buffer && srgb_twin(o.pixelFormat, (MTLPixelFormat)pf)) tw = o;
+    }
+    pthread_mutex_unlock(&g_smu);
+    if (!tw) return nil;
+    id<MTLTexture> v = [tw newTextureViewWithPixelFormat:(MTLPixelFormat)pf];
+    if (v) { static int n; if (n++ < 8) MLOG("texture format %#x over the storage of a shared one in its sRGB / linear twin format: a view of it (Metal %lu → %lu)", ak->d.format, (unsigned long)tw.pixelFormat, (unsigned long)pf); }
+    return v;
+}
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
@@ -2746,6 +2798,11 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     ak.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
     if (shared) { tex_put(t->serial, shared); return shared; }
+    id<MTLTexture> twin = alias_twin(&ak);
+    if (twin) {
+        pthread_mutex_lock(&g_smu); hm_put_id(&g_alias, &ak, twin); CFSetAddValue(g_alias_set, (__bridge const void *)twin); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
+        tex_put(t->serial, twin); return twin;
+    }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);

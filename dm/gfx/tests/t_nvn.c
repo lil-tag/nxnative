@@ -327,6 +327,32 @@ int main(void) {
     uint64_t counter_ns = P(nvnDeviceGetTimestampInNanoseconds)(&dev, &reported_counter);
     EXPECT("report converted to ns lies inside submit/wait", 1, counter_ns + 2 >= counter_before && counter_ns <= counter_after);
 
+    // 5b. CopyCommands copies the records (Mario Tennis Aces copies a scratch recording into each model's list, then records the next model into the same scratch):
+    //     the destination sized exactly at the source's GetCommandMemoryUsed, with no memory callback, keeps the copied draw after the source is recorded over
+    {
+        static uint8_t m[4096] __attribute__((aligned(4096))); NVNmemoryPoolBuilder mb; NVNmemoryPool mp; NVNcommandBuffer src, dstc;
+        P(nvnMemoryPoolBuilderSetDefaults)(&mb); P(nvnMemoryPoolBuilderSetStorage)(&mb, m, sizeof m); P(nvnMemoryPoolInitialize)(&mp, &mb);
+        P(nvnCommandBufferInitialize)(&src, &dev); P(nvnCommandBufferInitialize)(&dstc, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&src, &mp, 0, 1024); P(nvnCommandBufferBeginRecording)(&src);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&src, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 36, 0x10000, 5);
+        P(nvnCommandBufferDrawElementsBaseVertex)(&src, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x10000, 0);   // two draws: below 64 bytes AddCommandMemory lends a host segment
+        NVNcommandHandle hs0 = P(nvnCommandBufferEndRecording)(&src);
+        size_t S = P(nvnCommandBufferGetCommandMemoryUsed)(&src);
+        P(nvnCommandBufferAddCommandMemory)(&dstc, &mp, 2048, S); P(nvnCommandBufferBeginRecording)(&dstc);
+        P(nvnCommandBufferCopyCommands)(&dstc, 1, &hs0);
+        const uint8_t *hd = (const uint8_t *)P(nvnCommandBufferEndRecording)(&dstc);
+        EXPECT("the copy takes what the source took", S, P(nvnCommandBufferGetCommandMemoryUsed)(&dstc));
+        EXPECT("the copy stays in the memory given", 1, hd == m + 2048);
+        P(nvnCommandBufferAddCommandMemory)(&src, &mp, 0, 1024); P(nvnCommandBufferBeginRecording)(&src);   // the scratch recorded over
+        P(nvnCommandBufferDrawElementsBaseVertex)(&src, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 6, 0x20000, 0);
+        P(nvnCommandBufferEndRecording)(&src);
+        op_hdr h0, h1; memcpy(&h0, hd, sizeof h0); memcpy(&h1, hd + 2 * h0.size, sizeof h1);
+        p_draw_idx tmp; const p_draw_idx *dr = draw_idx_rec(hd + 8, h0.size, &tmp);
+        EXPECT("the copy holds the draw, not a CALL", OP_DRAW_IDX, h0.op);
+        EXPECT("the copied draw keeps its count after the source changed", 36, dr->count);
+        EXPECT("then the second draw and the END", OP_END, h1.op);
+    }
+
     // 5a. Command memory per recording, as GetCommandMemoryUsed reports it (games size prerecorded command blocks by it: Breath of the Wild records one scratch draw per mesh):
     //     no BEGIN record, a plain indexed draw without the indirect / multi-draw fields, and the handle is the first record; an indirect draw keeps its address
     {
