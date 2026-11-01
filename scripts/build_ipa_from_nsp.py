@@ -396,6 +396,17 @@ def build_nx_extract(repo, work, logs, env):
     return nx
 
 
+def mii_faces(nx, keys, logs, env):
+    """The Mii faces (MiiModel system data) from the player's installed Ryujinx firmware into nxnative's system data folder, once per Mac: games draw Mii heads from them
+    (hle_fs.c, DM_SYSDATA); without them the heads are empty. Nothing to do when they are there or there is no Ryujinx firmware; a failure only says so"""
+    dst = Path(env.get('DM_SYSDATA') or Path.home() / 'Library/Application Support/nxnative/sysdata') / '0100000000000802'
+    fw = Path.home() / 'Library/Application Support/Ryujinx/bis/system/Contents/registered'
+    if dst.is_dir() or not fw.is_dir(): return
+    log = logs / 'sysdata_miimodel.log'
+    with open(log, 'w') as f: code = subprocess.run([str(nx), str(keys), '--sysdata', str(fw), '0100000000000802', str(dst)], env=env, stdout=f, stderr=subprocess.STDOUT).returncode
+    say(f'Mii faces from the Ryujinx firmware: {dst}' if code == 0 else f'[RED] the Mii faces could not be taken from the Ryujinx firmware (see {log}): Mii heads draw empty')
+
+
 def swap_in(tmp, dst):   # swap the new output in as a whole (the old one is untouched on failure)
     rmtree(dst); tmp.rename(dst)
 
@@ -2508,6 +2519,7 @@ def main(args=None):
         PROG.stage('build nx_extract')
         nx = build_nx_extract(repo, work, logs, env)
         PROG.end()
+        mii_faces(nx, keys, logs, env)
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]

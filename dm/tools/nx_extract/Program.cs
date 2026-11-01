@@ -9,6 +9,8 @@
 // Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
 // Title ID of a package: nx_extract <prod.keys> --title <NSP, NSZ, XCI or XCZ> prints "title <16 hex digits>", the lowest title ID of the package's meta NCAs (the base game's, before its update's or a DLC's),
 //   read from the meta NCA's header with the keys' header_key. For a package without a ticket and without a [title ID] in its name (the NSP script's title_of); exit code 5 when it has no meta NCA.
+// System data: nx_extract <prod.keys> --sysdata <firmware folder> <title ID> <output dir> writes that system archive's RomFS (MiiModel 0100000000000802: the Mii faces) from an installed
+//   firmware, such as Ryujinx's bis/system/Contents/registered; exit code 5 when the firmware has no Data NCA of that title ID.
 // Title keys come from the common tickets (.tik) inside the NSPs, so only prod.keys is needed; key values are never printed.
 // The base game may also be a cartridge dump (.xci, Monster Hunter Rise): its secure partition holds the NCAs, which carry their keys in the key area (no ticket).
 //   When the cartridge also carries an update (1G+1U), only the base game's NCAs (those its Application content meta lists) are read; the update comes from the update NSP.
@@ -43,7 +45,8 @@ static class P {
         if (ai >= 0 && ai + 1 < a.Length) { app = Convert.ToUInt64(a[ai + 1], 16); var rest = new List<string>(a); rest.RemoveRange(ai, 2); a = rest.ToArray(); }
         if (a.Length == 3 && a[1] == "--title") return Title(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
         if (a.Length == 3 && a[1] == "--contents") return Contents(ExternalKeyReader.ReadKeyFile(a[0]), a[2]);
-        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>"); return 2; }
+        if (a.Length == 5 && a[1] == "--sysdata") return SysData(ExternalKeyReader.ReadKeyFile(a[0]), a[2], Convert.ToUInt64(a[3], 16), a[4]);
+        if (a.Length < 4) { Console.Error.WriteLine("usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--app <title ID>] [--romfs-image|--manifest] [--allow-damaged]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir or image> [<DLC title ID>] [--romfs-image]\n       nx_extract <prod.keys> --title <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --contents <nsp|nsz|xci|xcz>\n       nx_extract <prod.keys> --sysdata <firmware folder> <title ID> <out dir>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
         if (a[1] == "--aoc") return Aoc(ks, a[2], a[3], image, a.Length > 4 ? Convert.ToUInt64(a[4], 16) : null);
         // each by its own content meta: a merged package (base game + update + DLC in one NSP, a cartridge dump with its update) is given as both the base game and the update,
@@ -109,6 +112,29 @@ static class P {
         foreach (Cnmt c in Metas(OpenNsp(ks, path))) { Console.WriteLine($"content {c.Type} {c.TitleId:x16} {c.TitleVersion.Version}"); n++; }
         if (n == 0) { Console.WriteLine($"[RED] no content meta in {Path.GetFileName(path)}"); return 5; }
         return 0;
+    }
+
+    // One system data archive (MiiModel 0100000000000802, ...) out of an installed firmware: the folder holds the firmware's NCAs, as files or as Ryujinx keeps them (<name>.nca/00 in
+    // bis/system/Contents/registered). The Data or PublicData NCA of that title ID has its RomFS written to <out dir> whole or not at all (through <out dir>.partial), for the host's DM_SYSDATA folder
+    static int SysData(KeySet ks, string fw, ulong id, string outDir) {
+        int opened = 0; string why = null;
+        foreach (string p in Directory.EnumerateFileSystemEntries(fw, "*.nca", SearchOption.AllDirectories)) {
+            string f = Directory.Exists(p) ? Path.Combine(p, "00") : p;
+            if (!File.Exists(f)) continue;
+            Nca n;
+            try { n = new Nca(ks, new LocalStorage(f, FileAccess.Read)); opened++; } catch (Exception e) { why ??= e.Message; continue; }   // not an NCA this key set opens
+            if (n.Header.TitleId != id || n.Header.ContentType is not (NcaContentType.Data or NcaContentType.PublicData)) continue;   // MiiModel is PublicData
+            Console.WriteLine($"system data {id:x16}: {Path.GetFileName(p)}");
+            string tmp = outDir + ".partial";
+            if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
+            Copy(new RomFsFileSystem(n.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)), tmp, null);
+            if (g_damaged.Count > 0) { Directory.Delete(tmp, true); return Damaged(); }
+            if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
+            Directory.Move(tmp, outDir);
+            return 0;
+        }
+        Console.WriteLine($"[RED] no system data {id:x16} in {fw} ({opened} NCAs read{(why != null ? $"; others unreadable: {why}" : "")})");
+        return 5;
     }
 
     static bool Sparse(Nca n) {

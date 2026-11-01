@@ -5,6 +5,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [Building: the NSP script](#building-the-nsp-script)
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
+- [Online play](#online-play)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
 ## Building: the NSP script
@@ -95,6 +96,29 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph�
 - **What a front end may write while the game runs.** Nothing the host reads back on its own: the host reads `<build ID>.enabled` and the cheat file when it loads them, at the start and on the player's "Reload cheats" (⌘R in the Mac window, which re-reads the same file and the toggles with it), and never watches the folder. So a front end writes before the start, or tells the player to reload. The panel's refresh while it is open reads the engine's state, not the files. For one start, `DM_CHEATS_ON=<name>,<name>,…` in the launch environment turns the named cheats on without touching `.enabled` (case-insensitive, by name); `DM_CHEATS_ANY_BUILD=1` loads the folder's single file of another build when the running build has none (its addresses may not fit: for checking a carried file), and `DM_CHEATS_DEBUG=1` logs every write. The three are diagnostics, not settings: they are not in `launcher.json`.
 - **The iPhone.** The engine is compiled into the iOS host too (without safe mode), with the same folder rule, but the iOS app sets neither `DM_CHEATS` nor `DM_ROOT`, so cheats are off there unless `Documents/env.txt` names a folder with `DM_CHEATS`; even then they write data only, never code (the app's code pages are signed). Giving the iOS app a default, `Documents/cheats`, is the natural next step once a front end wants to manage cheats on a device; it is not in this change.
 - **Carrying a file to another build.** `scripts/cheat_anchor.py` imports a cheat file into a version-independent source and compiles it for any build of the game ([the rewriter reference](reference/rewriter.md#cheats-carried-across-game-updates)). A front end need not know about it: the compiled `<build ID>.txt` is an ordinary cheat file, and its `.meta.tsv` makes the panel richer.
+
+## Online play
+
+A game plays online on [Nextendo Network](https://nextendo.network) when it starts with `DM_NEXTENDO=1`; without it, or with `0`, it stays offline as before (`dm/host/hle_online.c`, `hle_online_ssl.c`, `hle_online_account.c`).
+
+- **The switch is a row of the settings list** (Nextendo online play, in Game, a toggle that is off by default). A front end that draws the list shows it with no extra code, and keeps the player's choice in the saved choices like any other row.
+- **The sign-in is one file for every game:** `~/Library/Application Support/nxnative/nextendo.env`, lines of `KEY=VALUE`: `DM_NEXTENDO_PID` (the account number), `DM_NEXTENDO_TOKEN` (the game token from Nextendo's `/api/nex-token`, valid 30 days), `DM_NEXTENDO_NAME` and `DM_NEXTENDO_COUNTRY` (two letters). A front end signs the player in through Nextendo's OAuth page with its own client ID, writes the file with owner-only permissions, and writes it again whenever it gets a fresh token; on sign-out it deletes it. The same variables in a game's environment win over the file, and `DM_NEXTENDO_ACCOUNT` names another file. Without a sign-in a game reaches Nextendo's servers but stops at its login.
+- **What it turns on:** the network status reports the Mac online with its own address; sockets are the Mac's; name lookups send Nintendo's server names to Nextendo's servers (other names resolve normally); TLS runs to Nextendo's addresses only, accepting their own certificates; and the network service account is the Nextendo account, with an id token made locally as Ryujinx-Nextendo makes it. The log says `[online]` for the sign-in, each lookup, connection and TLS handshake.
+- **Server addresses:** `DM_NEXTENDO_SERVER` and `DM_NEXTENDO_NAT` replace Nextendo's defaults, for a test server.
+
+## Saves from Ryujinx, new saves and kept saves
+
+A Mac build plays the save in `<id>_build/run/save` (and `run/save_device` for a game that mounts device save data beside its account save, such as Mario Kart 8 Deluxe); other saves wait in `<id>_build/run/saves/<name>/`, each with its `save/` and `save_device/`. `scripts/ryujinx_save.py` changes which one is played, and a front end only has to call it (with the game stopped) and show its output:
+
+- **`list <game folder>`:** the game's saves in Ryujinx (its data folder, default `~/Library/Application Support/Ryujinx`, or `--ryujinx`) with their profile and date, and the kept saves.
+- **`import <game folder> [--user <profile name>]`:** copies the Ryujinx account save of the profile marked Open (else the newest) into `run/save`, and the game's device save into `run/save_device` (into `run/save` for a game with a device save only). Ryujinx lays out save files as nxnative does, so nothing is converted.
+- **`new <game folder>`:** an empty save; the game starts as on a new console. **`use <game folder> <name>`:** a kept save.
+- **Nothing is deleted:** whatever a command replaces is kept first as `saves/before <what> <date time>`. The script refuses while the game runs.
+
+## The player's Miis
+
+- **The Miis:** games that list the console's Miis (Mario Kart, Smash's Mii Fighters) get the player's Mii database, then the six default Miis, from the first of: `DM_MII_DATABASE`, `~/Library/Application Support/nxnative/MiiDatabase.dat`, Ryujinx's `bis/system/save/8000000000000030/0/MiiDatabase.dat` (`dm/host/hle_mii.c`). Without one, only the six default Miis. Making or editing Miis needs the console's Mii editor, which the host does not have.
+- **Their faces:** a game draws Mii heads from the firmware's MiiModel archive. `nx_extract <prod.keys> --sysdata <Ryujinx>/bis/system/Contents/registered 0100000000000802 ~/Library/Application Support/nxnative/sysdata/0100000000000802` takes it from the player's installed firmware, once for every game, and the NSP script does it by itself when the folder is missing and Ryujinx's firmware is installed (`mii_faces`); the host mounts any archive in that folder (`DM_SYSDATA` names another). Without it, Mii heads draw nothing.
 
 ## What a front end cannot see yet
 

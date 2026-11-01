@@ -3,6 +3,8 @@
 #include "../hle_misc.c"
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop and error stand-ins hold the game out of focus
 void dm_applet_leave(void) {}
+int dm_online(void) { return 0; }   // hle_online.c: offline here, so nsd never resolves through Nextendo
+uint32_t dmo_nsd_resolve(char *out, const char *in) { (void)out; (void)in; return 0; }
 #include <mach-o/getsect.h>
 
 static int unexpected, checks, fails;
