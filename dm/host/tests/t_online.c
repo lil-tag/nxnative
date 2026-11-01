@@ -41,6 +41,11 @@ int main(void) {
     CHECK(dmo_getaddrinfo("g23380901-%.s.n.srv.nintendo.net", "443", NULL, &res) == 0 && !strcmp(ip_of(res, ip), "51.178.29.194"), "a lookup of a Nintendo name gives Nextendo's address");
     CHECK(res && ntohs(((struct sockaddr_in *)((struct addrinfo *)res)->ai_addr)->sin_port) == 443, "the service becomes the port");
     dmo_freeaddrinfo(res);
+    // nn::socket::AddrInfo, the typed overload: addr at +0x18, canonname at +0x20 (Smash's Pia reads the NAT check server's address at +0x18, main+0xba8d0)
+    CHECK(dmo_getaddrinfo_nn("nncs1-lp1.n.n.srv.nintendo.net", NULL, NULL, &res) == 0 && res, "the typed lookup answers");
+    const uint8_t *ai = res, *a18 = res ? *(const uint8_t *const *)(ai + 0x18) : NULL;
+    CHECK(a18 && a18[1] == AF_INET && !strcmp(inet_ntop(AF_INET, a18 + 4, ip, sizeof ip), "51.178.29.194") && !*(const void *const *)(ai + 0x20), "its address at +0x18, no name at +0x20");
+    dmo_freeaddrinfo_nn(res);   // swapped back before the Mac frees it (a double free otherwise)
     struct hostent *he = dmo_gethostbyname("nncs2-lp1.n.n.srv.nintendo.net");
     CHECK(he && he->h_length == 4 && he->h_addr_list[0] && !strcmp(inet_ntop(AF_INET, he->h_addr_list[0], ip, sizeof ip), "164.132.111.120"), "gethostbyname gives the NAT address");
 

@@ -78,10 +78,10 @@ SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, con
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { if (dm_online()) return dmo_recvfrom(s, b, n, f, 0, 0); (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "bsd socket service (cut)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { if (dm_online()) return dmo_recvfrom(s, b, n, f, a, al); (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "bsd socket service (cut)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { if (dm_online()) return dmo_sendto(s, b, n, f, 0, 0); (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
-HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) { if (dm_online()) return dmo_getaddrinfo(h, s, hint, res);
+HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) { if (dm_online()) return dmo_getaddrinfo_nn(h, s, hint, res);
     (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4;   // EAI_FAIL
 }
-HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAddrInfo, void *ai) { if (dm_online()) { dmo_freeaddrinfo(ai); return; } (void)ai; }
+HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAddrInfo, void *ai) { if (dm_online()) { dmo_freeaddrinfo_nn(ai); return; } (void)ai; }
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution (cut): NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { if (dm_online()) return dmo_gethostbyname(n); (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { if (dm_online()) return dmo_errno(); return t_skerr; }
 // C interface

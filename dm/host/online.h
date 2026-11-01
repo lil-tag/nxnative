@@ -28,6 +28,8 @@ int dmo_host_fd(int s);                       // the Mac's descriptor behind a g
 uint32_t dmo_nsd_resolve(char *out, const char *in);
 int dmo_getaddrinfo(const char *node, const char *service, const void *hints, void **res);
 void dmo_freeaddrinfo(void *ai);
+int dmo_getaddrinfo_nn(const char *node, const char *service, const void *hints, void **res);   // nn::socket::AddrInfo: ai_addr before ai_canonname
+void dmo_freeaddrinfo_nn(void *ai);
 void *dmo_gethostbyname(const char *node);
 uint32_t dmo_ip(uint32_t *mask);
 uint32_t dmo_ip_config(uint32_t *ip, uint32_t *mask, uint32_t *gw, uint32_t *dns1, uint32_t *dns2);

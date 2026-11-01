@@ -307,6 +307,16 @@ int dmo_getaddrinfo(const char *node, const char *service, const void *hints, vo
     return r;   // EAI_* values are BSD's on both
 }
 void dmo_freeaddrinfo(void *ai) { if (ai) freeaddrinfo(ai); }
+// nn::socket::AddrInfo (the SDK's own type, GetAddrInfo's typed overload) keeps ai_addr at +0x18 and ai_canonname at +0x20, Linux's order; the libc
+// addrinfo overload and nnsocketGetAddrInfo have the Mac's, canonname first. Smash's Pia reads the NAT check server's address through the typed one
+// (main+0xba8d0): with the Mac's order it took the empty name for the address and crashed at matchmaking
+static void ai_swap(struct addrinfo *ai) { for (; ai; ai = ai->ai_next) { void *t = ai->ai_canonname; ai->ai_canonname = (char *)ai->ai_addr; ai->ai_addr = t; } }
+int dmo_getaddrinfo_nn(const char *node, const char *service, const void *hints, void **res) {
+    int r = dmo_getaddrinfo(node, service, hints, res);
+    if (!r) ai_swap(*res);
+    return r;
+}
+void dmo_freeaddrinfo_nn(void *ai) { ai_swap(ai); dmo_freeaddrinfo(ai); }
 // hostent has the same layout everywhere; one per thread, as gethostbyname's
 void *dmo_gethostbyname(const char *node) {
     static __thread struct hostent he; static __thread char name[256]; static __thread struct in_addr addr[8]; static __thread char *list[9];
