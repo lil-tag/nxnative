@@ -1,16 +1,16 @@
 # Pokémon Scarlet (`0100A3D008C5C000`)
 
-Base game 1.0.0 (v0), SDK 13.3.5, Game Freak's Trinity engine on NVN.
-Playable on the Mac: language and character selection, the academy opening,
+Base game 1.0.0 (v0), SDK 13.3.5, and update 4.0.0 (v786432), SDK 13.3.13,
+Game Freak's Trinity engine on NVN. 1.0.0 is playable on the Mac: language and character selection, the academy opening,
 the native Bink movie, getting up in the bedroom, walking downstairs and
 through the living room and kitchen, camera control, dialogue and save/reload.
 The unsigned 1.0.0 IPA is built (~7.0 GB); iPhone testing is pending.
-Only 1.0.0 is registered, and the profile's shader tables come from v0.
-When the NSP folder also contains updates, build the supported version with
-`scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> -p v0` (add
-`--platform mac` for a Mac build). The builder otherwise selects the newest
-supplied version. The supplied 4.0.0 update is damaged and remains unsupported
-(see [Files and builds](#files-and-builds)).
+Both versions are registered; 4.0.0 is packed by default and `-p v0` packs
+1.0.0. The shader tables are the union of both, so the NSP folder needs the
+base game and the 4.0.0 update for a build from the profile as it is (with the
+base alone, 1.0.0 builds from a derived profile). 4.0.0 boots on the Mac
+through the opening to the bedroom and outside the house (see
+[Mac routes](#mac-routes-and-validation)).
 [Pokémon Violet](../01008F6008C5E000/README.md) is its twin: the same `sdk`
 and `subsdk0` builds and the same shader tables, with a `main` of its own.
 
@@ -64,10 +64,11 @@ game's own Oodle decoder extract them. Chain `157e1b96c8da`, profile inputs
 bindings. The complete build supplies the stamped `c1_full.tsv` and
 `cb_extent.tsv`; no shader override is needed.
 
-The 4.0.0 split aborts on 195 malformed active Trinity packs in the damaged
-input described [below](#files-and-builds). Full 4.0.0 shader coverage and an
-update IPA have not been produced. Its partial startup used the base shader
-libraries and reported missing update shader keys.
+With 4.0.0 (an intact update), 4.0.0 alone has 35,937 shaders, and the
+registered tables, the union of 1.0.0 and 4.0.0, have 39,216: 18,446 vertex,
+20,675 pixel and 95 compute, with 35,610 variation pairs. Sources: `arc`
+32,704, `system` 6,472, `main` 40. Chain `b7cd656abd7c`: all 39,216 compile
+for the Mac. iPhone libraries have not been built for 4.0.0.
 
 ### Pipeline preparation depth
 
@@ -89,6 +90,13 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   This selects English and the blonde girl, enters the name, confirms the
   character and advances the academy text. Let the opening movie finish.
   The get-up prompt appears around frame 10,000; `LDown~2` starts getting up.
+- **4.0.0, 2026-11-01, chain `b7cd656abd7c`:** a fresh save with the same
+  start and `f1300:A*200/90,f19400:LDown~2,f19600:A*20/90,f21500:LDown~2`
+  runs 15 minutes without a crash at about 28 fps: the menus, the opening
+  movie, Mom's scene, the bedroom, walking through the house and outside to
+  Clavell's starter scene. The 4.0.0 opening has more dialogue before the
+  bedroom than 1.0.0, so the 1.0.0 route's presses end too early. Red lines:
+  one zero-copy buffer retry and the conservative-rasterization setter below.
 - The bedroom save continues with `DM_KEYS="f300:A*5/150"`. The final presses
   can open the bag-and-hat dialogue; close it with A before walking. The left
   stick moves, the right stick turns the camera, and A interacts. The iOS
@@ -184,7 +192,16 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   The host supplies the imports from Nintendo's movie module `subsdk0`.
 - The complete, CRC-checked 1.0.0 IPA remains preserved at
   `<NSP folder>/PokemonScarlet-1.0.0.ipa`.
-- **Blocked: supplied update 4.0.0 (v786432) has erased payload bytes.**
+- **4.0.0 (v786432), registered 2026-11-01:** an intact copy of the update
+  (program NCA hashes to its CNMT's `7e5b9bbf…`) extracts with no damage:
+  30 merged RomFS files, 9,465.4 MiB. Modules are `main` (`421c5411…`) and
+  `sdk` (`bb560bdf…`, SDK 13.3.13). Against 1.0.0, `main` imports 34
+  `nn::bluetooth` Bluetooth LE functions (the Pokémon GO Plus + link) that open
+  the `bt`/`btm` services; `hle_offline.c` makes Bluetooth LE unavailable
+  (no scan results, connections fail, events never fire). No other new import
+  reaches a service. The DLC licence NSP unlocks the DLC areas, whose data
+  ship in the update.
+- **History: an earlier supplied copy of 4.0.0 had erased payload bytes.**
   Independent checks trace 2,633 invalid 16 KB data blocks to three all-zero
   ciphertext ranges in the original NSP: 2,629 blocks in `arc/data.trpfs`
   and four in `audio/wwise/bin/Switch/DEMO.bnk`. The ranges below use absolute
@@ -223,8 +240,7 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   through frame 3,475 using base shaders; it was not gameplay validation.
   The investigation is preserved under the work folder's `update4/` and
   `release-1.0.0/before-scope-trim/`. No 4.0.0 build or cuts are registered in
-  this profile. An intact update source is required for its full shader build
-  and gameplay validation.
+  this profile. The intact copy above replaced it.
 - The supplied DLC is a licence-only NSP, with no data to extract.
 
 ## Open
@@ -233,7 +249,9 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   is unimplemented. The enable setter is ignored and the dilation setter
   reports `[RED] NVN unimplemented function called`. Its visual contribution
   has not been isolated; the diagnostic has not been suppressed.
-- Outdoor exploration and battles have not been validated yet.
+- Outdoor exploration and battles have not been validated yet, on either version.
+- 4.0.0: the iPhone build, the DLC areas and save compatibility with 1.0.0 saves
+  are untested.
 - iPhone gameplay, device memory and touch controls are untested. Audio runs
   through both Wwise output queues on the Mac without sustained underruns;
   listening on the iPhone is pending.
