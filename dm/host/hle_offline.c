@@ -204,3 +204,32 @@ HLE_FORCE("_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE", "URL of the 
 HLE_FORCE("_ZN2nn5album14ShowAlbumFilesEv", "album applet: not shown", Result, h_album_Show, void) { return RES_FAIL; }
 // Pokémon Legends: Z-A (SDK 19): a screenshot of the current frame, taken by the capture service
 HLE_FORCE("_ZN2nn5album21SaveCurrentScreenshotENS0_17AlbumReportOptionE", "screenshot of the current frame (capsrv): no album, fails", Result, h_album_SaveCur, int report) { (void)report; LOG("album::SaveCurrentScreenshot (no album)"); return RES_FAIL; }
+
+// ---------- bluetooth: Bluetooth LE (Pokémon Scarlet 4.0.0's Pokémon GO Plus + link; 1.0.0 had none). InitializeBle opens the bt and btm services; the host has no Bluetooth,
+// so nothing is ever found or connected. Return types from the SDK 13.3.13 sdk: GetGattService and GattDescriptor::GetCharacteristic are bool, the three list calls return
+// a count, the rest pass on a converted Result. Gatt object constructors, getters and SetValue only touch the game's own objects and keep running in the SDK ----------
+HLE_FORCE("_ZN2nn9bluetooth13InitializeBleEv", "Bluetooth LE init (bt, btm): the host has no Bluetooth, no-op", void, h_ble_Init, void) {}
+HLE_FORCE("_ZN2nn9bluetooth19AcquireBleScanEventEPNS_2os15SystemEventTypeE", "BLE scan event: bound, never fires", Result, h_ble_EvScan, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth24AcquireBleMtuConfigEventEPNS_2os15SystemEventTypeE", "BLE MTU event: bound, never fires", Result, h_ble_EvMtu, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth28AcquireBleGattOperationEventEPNS_2os15SystemEventTypeE", "BLE GATT operation event: bound, never fires", void, h_ble_EvGatt, void *ev) { hle_bind_system_event(ev, 0); }
+HLE_FORCE("_ZN2nn9bluetooth31AcquireBleServiceDiscoveryEventEPNS_2os15SystemEventTypeE", "BLE service discovery event: bound, never fires", Result, h_ble_EvDisc, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth37AcquireBleConnectionStateChangedEventEPNS_2os15SystemEventTypeE", "BLE connection event: bound, never fires", Result, h_ble_EvConn, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth19GetBleScanParameterEPNS0_17GattAttributeUuidEi", "BLE scan filter UUID: zero", void, h_ble_ScanPrm, uint8_t *uuid, int id) { (void)id; if (uuid) memset(uuid + 4, 0, 16); }
+HLE_FORCE("_ZN2nn9bluetooth23StartBleScanSmartDeviceERKNS0_17GattAttributeUuidE", "BLE scan (no Bluetooth): fails", Result, h_ble_ScanOn, const void *u) { (void)u; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth22StopBleScanSmartDeviceEv", "BLE scan stop (no Bluetooth): fails", Result, h_ble_ScanOff, void) { return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan results: 0 found", int, h_ble_ScanRes, void *o, int n) { (void)o; (void)n; return 0; }
+HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections: 0", uint8_t, h_ble_Conns, void *o, int n) { (void)o; (void)n; return 0; }
+HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (no Bluetooth): fails", Result, h_ble_Conn, const void *a) { (void)a; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth24DisconnectFromGattServerEj", "BLE disconnect (no Bluetooth): fails", Result, h_ble_Disc, uint32_t h) { (void)h; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth15ConfigureBleMtuEjt", "BLE MTU (no Bluetooth): fails", Result, h_ble_Mtu, uint32_t h, uint16_t m) { (void)h; (void)m; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth14GetGattServiceEPNS0_11GattServiceERKNS0_17GattAttributeUuidEj", "BLE GATT service: none", uint8_t, h_ble_Svc, void *o, const void *u, uint32_t h) { (void)o; (void)u; (void)h; return 0; }
+HLE_FORCE("_ZNK2nn9bluetooth11GattService18GetCharacteristicsEPNS0_18GattCharacteristicEi", "BLE GATT characteristics: 0", int, h_ble_Chars, const void *s, void *o, int n) { (void)s; (void)o; (void)n; return 0; }
+HLE_FORCE("_ZNK2nn9bluetooth18GattCharacteristic14GetDescriptorsEPNS0_14GattDescriptorEi", "BLE GATT descriptors: 0", int, h_ble_Descs, const void *c, void *o, int n) { (void)c; (void)o; (void)n; return 0; }
+HLE_FORCE("_ZNK2nn9bluetooth14GattDescriptor17GetCharacteristicEPNS0_18GattCharacteristicE", "BLE GATT characteristic of a descriptor: none", uint8_t, h_ble_DescChar, const void *d, void *o) { (void)d; (void)o; return 0; }
+HLE_FORCE("_ZN2nn9bluetooth22ReadGattCharacteristicERKNS0_18GattCharacteristicE", "BLE GATT read (no Bluetooth): fails", Result, h_ble_Read, const void *c) { (void)c; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth23WriteGattCharacteristicERKNS0_18GattCharacteristicE", "BLE GATT write (no Bluetooth): fails", Result, h_ble_Write, const void *c) { (void)c; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth19WriteGattDescriptorERKNS0_14GattDescriptorE", "BLE GATT descriptor write (no Bluetooth): fails", Result, h_ble_WriteD, const void *d) { (void)d; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth36EnableGattCharacteristicNotificationERKNS0_18GattCharacteristicEb", "BLE GATT notification (no Bluetooth): fails", Result, h_ble_Notify, const void *c, unsigned on) { (void)c; (void)on; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth33RegisterGattOperationNotificationERKNS0_17GattAttributeUuidE", "BLE GATT data path (no Bluetooth): fails", Result, h_ble_RegN, const void *u) { (void)u; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth35UnregisterGattOperationNotificationERKNS0_17GattAttributeUuidE", "BLE GATT data path (no Bluetooth): fails", Result, h_ble_UnregN, const void *u) { (void)u; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth22GetGattOperationResultEPNS0_26BleClientGattOperationInfoE", "BLE GATT operation result: the event never fires, nothing to report", void, h_ble_OpRes, void *o) { (void)o; }
