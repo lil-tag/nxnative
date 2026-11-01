@@ -6,7 +6,7 @@ The screen before the game starts shows the settings the game supports. A settin
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game language](#game-language), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
-- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
+- [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode), [Resolution](#resolution)
 - [TV](#tv)
 - [Settings in a file](#settings-in-a-file)
 
@@ -192,6 +192,10 @@ Turn off **Show this window at launch** to start the game at once with your choi
 ### Display mode
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
+
+### Resolution
+
+**Original**, **1.5×** or **2× (4K)**: how many pixels the Mac draws the game with. At 2× a game made for 1920×1080 is drawn at 3840×2160, so edges, text and textures are sharper. It costs GPU time: Super Smash Bros. Ultimate stays at 60 fps at 2× on an M4 Mac mini, Pokémon Legends: Z-A mostly holds its 30 fps, and Pokémon Scarlet drops to about 10–18 fps. Lower it if a game slows down. In an `env.txt`: `DM_RES_SCALE=2`.
 
 ### Cloud saves folder
 
