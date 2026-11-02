@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +31,7 @@ typedef struct {
     SSLContextRef tls;
     int eof;
     size_t npeek; uint8_t peek[16384];   // read ahead for Peek
+    unsigned nreads;   // records read, for the dump
 } conn_t;
 static _Atomic uint64_t g_ids;
 static conn_t *conn(void *self) { return self ? objmap_get(self) : NULL; }
@@ -122,13 +125,23 @@ static Result c_handshake(conn_t *c) {
     return RES_OK;
 }
 // Read (consume) or Peek: plaintext already read ahead first; then the connection, waiting in blocking mode
+// DM_NEXTENDO_DUMP=<file>: every TLS record the game reads, and every one it writes once the connection has read 4 (past the sign-in, which carries the
+// token), appended as [direction 'R'/'W', u8][game socket, i32][length, u32][bytes]: the game server's messages in the clear, to see what a game does with them
+static void tls_dump(conn_t *c, char dir, const void *b, size_t n) {
+    static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER; const char *path = getenv("DM_NEXTENDO_DUMP");
+    if (!path || !*path || !n || (dir == 'W' && c->nreads < 4)) return;
+    pthread_mutex_lock(&m);
+    FILE *f = fopen(path, "ab");
+    if (f) { int32_t s = c->gfd; uint32_t l = (uint32_t)n; fputc(dir, f); fwrite(&s, 4, 1, f); fwrite(&l, 4, 1, f); fwrite(b, 1, n, f); fclose(f); }
+    pthread_mutex_unlock(&m);
+}
 static Result c_read(conn_t *c, char *b, uint32_t n, int *out, int consume) {
     if (!c->tls) return R_NO_SOCKET;
     for (;;) {
         if (c->npeek || !n) {
             size_t k = c->npeek < n ? c->npeek : n;
             memcpy(b, c->peek, k);
-            if (consume) { memmove(c->peek, c->peek + k, c->npeek - k); c->npeek -= k; }
+            if (consume) { tls_dump(c, 'R', b, k); c->nreads++; memmove(c->peek, c->peek + k, c->npeek - k); c->npeek -= k; }
             if (out) *out = (int)k;
             return RES_OK;
         }
@@ -138,6 +151,7 @@ static Result c_read(conn_t *c, char *b, uint32_t n, int *out, int consume) {
         if (dmo_trace()) LOG("[online] trace TLS read socket %d: asked %u, got %zu, status %d%s", c->gfd, n, got, (int)st, c->nonblock ? " (non-blocking)" : "");
         if (got) {
             if (!consume) { c->npeek = got; continue; }
+            tls_dump(c, 'R', b, got); c->nreads++;
             if (out) *out = (int)got;
             return RES_OK;
         }
@@ -155,6 +169,7 @@ static Result c_write(conn_t *c, const char *b, uint32_t n, int *out) {
     dm_thread_native_wait(0);
     if (st && !put) { LOG("[online] TLS write failed: OSStatus %d", (int)st); return R_RESET; }
     if (dmo_trace()) LOG("[online] trace TLS write socket %d: %u bytes, %zu sent, status %d", c->gfd, n, put, (int)st);   // sizes only: requests carry the sign-in token
+    tls_dump(c, 'W', b, put);
     if (out) *out = (int)put;
     return RES_OK;
 }

@@ -338,6 +338,7 @@ int main(void) {
         P(nvnCommandBufferDrawElementsBaseVertex)(&src, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x10000, 0);   // two draws: below 64 bytes AddCommandMemory lends a host segment
         NVNcommandHandle hs0 = P(nvnCommandBufferEndRecording)(&src);
         size_t S = P(nvnCommandBufferGetCommandMemoryUsed)(&src);
+        EXPECT("the size is the block last added, not used + free (two draws moved into a host segment)", 1024, P(nvnCommandBufferGetCommandMemorySize)(&src));
         P(nvnCommandBufferAddCommandMemory)(&dstc, &mp, 2048, S); P(nvnCommandBufferBeginRecording)(&dstc);
         P(nvnCommandBufferCopyCommands)(&dstc, 1, &hs0);
         const uint8_t *hd = (const uint8_t *)P(nvnCommandBufferEndRecording)(&dstc);
@@ -345,6 +346,13 @@ int main(void) {
         EXPECT("the copy stays in the memory given", 1, hd == m + 2048);
         P(nvnCommandBufferAddCommandMemory)(&src, &mp, 0, 1024); P(nvnCommandBufferBeginRecording)(&src);   // the scratch recorded over
         P(nvnCommandBufferDrawElementsBaseVertex)(&src, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 6, 0x20000, 0);
+        EXPECT("the size holds while recording (Smash sorts its command buffers by it from another thread)", 1024, P(nvnCommandBufferGetCommandMemorySize)(&src));
+        // a recording that outgrows the game's block continues in a host-lent segment: used + free then describes that segment, the size stays the game's block
+        NVNcommandBuffer ov; P(nvnCommandBufferInitialize)(&ov, &dev);
+        P(nvnCommandBufferAddCommandMemory)(&ov, &mp, 3072, 128); P(nvnCommandBufferBeginRecording)(&ov);
+        for (int k = 0; k < 8; k++) P(nvnCommandBufferDrawElementsBaseVertex)(&ov, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 6, 0x20000, 0);
+        EXPECT("past the game's block into a host segment, the size is still the block", 128, P(nvnCommandBufferGetCommandMemorySize)(&ov));
+        P(nvnCommandBufferEndRecording)(&ov);
         P(nvnCommandBufferEndRecording)(&src);
         op_hdr h0, h1; memcpy(&h0, hd, sizeof h0); memcpy(&h1, hd + 2 * h0.size, sizeof h1);
         p_draw_idx tmp; const p_draw_idx *dr = draw_idx_rec(hd + 8, h0.size, &tmp);

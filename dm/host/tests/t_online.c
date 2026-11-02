@@ -78,6 +78,18 @@ int main(void) {
     uint32_t mask = 0, me = dmo_ip(&mask);
     fprintf(stderr, "t_online: this Mac's address %s\n", inet_ntop(AF_INET, &me, ip, sizeof ip));
 
+    // Pia's close-and-rebind: a bound UDP socket the game closes is parked, and a new UDP socket bound to the same port gets it back (its NAT mapping kept)
+    {
+        int u1 = dmo_socket(AF_INET, SOCK_DGRAM, 17); uint8_t any[16] = {0, AF_INET, 0, 0, 127, 0, 0, 1}, got[16]; unsigned gl = sizeof got;
+        CHECK(u1 >= 3 && dmo_bind(u1, any, sizeof any) == 0 && dmo_sockname(u1, got, &gl, 0) == 0, "a UDP socket bound to a free port");
+        int host1 = dmo_host_fd(u1), port = got[2] << 8 | got[3];
+        CHECK(dmo_close(u1) == 0 && dmo_host_fd(u1) < 0, "closing it frees the game's descriptor");
+        int u2 = dmo_socket(AF_INET, SOCK_DGRAM, 17); uint8_t same[16] = {0, AF_INET, (uint8_t)(port >> 8), (uint8_t)port, 127, 0, 0, 1};
+        CHECK(dmo_bind(u2, same, sizeof same) == 0 && dmo_host_fd(u2) == host1, "rebinding the same port takes the parked socket back");
+        dmo_close(u2);
+        int t = dmo_socket(AF_INET, SOCK_STREAM, 0); int ht = dmo_host_fd(t);
+        CHECK(dmo_close(t) == 0 && fcntl(ht, F_GETFD) < 0, "a TCP socket closes for real");
+    }
     printf("t_online: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

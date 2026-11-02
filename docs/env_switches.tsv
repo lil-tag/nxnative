@@ -90,13 +90,14 @@ DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain 
 DM_NEXTENDO	player	`1` plays online on Nextendo Network: real sockets, name lookups that send Nintendo's server names to Nextendo (`dm/host/hle_online.c`); `0` or unset, offline. The settings list's Nextendo online play
 DM_NEXTENDO_ACCOUNT	path	With `DM_NEXTENDO=1`, the Nextendo sign-in file to read instead of `~/Library/Application Support/nxnative/nextendo.env` (KEY=VALUE lines of the `DM_NEXTENDO_PID`, `_TOKEN`, `_NAME`, `_COUNTRY` switches; `dm/host/hle_online_account.c`)
 DM_NEXTENDO_COUNTRY	switch	The account's country, two letters (the online flag in Mario Kart 8 Deluxe). Wins over the sign-in file
-DM_NEXTENDO_NAME	switch	The Nextendo user name, for the log. Wins over the sign-in file
+DM_NEXTENDO_NAME	switch	The Nextendo user name, for the log and as the account nickname online when `DM_NICK` is unset. Wins over the sign-in file
 DM_NEXTENDO_NAT	switch	With `DM_NEXTENDO=1`, the address of Nextendo's NAT check and of the game servers that live beside it (default Nextendo's)
 DM_NEXTENDO_PID	switch	The Nextendo account number (the game's network service account ID); with `DM_NEXTENDO_TOKEN`, the player is signed in. Wins over the sign-in file
 DM_NEXTENDO_SERVER	switch	With `DM_NEXTENDO=1`, the address Nintendo's server names go to (default Nextendo's main server)
 DM_NEXTENDO_TOKEN	switch	The Nextendo game token (`/api/nex-token`, valid 30 days), carried in the id token's `nnex` claim. Wins over the sign-in file
+DM_NEXTENDO_DUMP	diagnostic	With `DM_NEXTENDO=1`, `=<file>` writes the plaintext of every TLS connection after its first four reads (records: direction R/W, socket, length, bytes), to decode a game's NEX messages. Holds the session's data: for debugging only
 DM_NEXTENDO_TRACE	diagnostic	With `DM_NEXTENDO=1`, `1` logs every socket and TLS call with its arguments, result and errno, and the game code that closes a socket (`[online] trace`): where a game's online step stops. Sizes only, never the data
-DM_NICK	switch	The account nickname the game sees (default `Player`)
+DM_NICK	switch	The account nickname the game sees (default: the Nextendo name when online play is on and signed in, else `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)

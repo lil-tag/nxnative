@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 int dm_online(void) {
@@ -43,6 +44,11 @@ static int lx_errno(int e) {
     }
 }
 static long fail(void) { t_err = lx_errno(errno); return -1; }
+static const char *sa_str(const struct sockaddr_storage *ss, char *out, size_t n) {   // "a.b.c.d:port" for the trace
+    if (ss->ss_family != AF_INET) { snprintf(out, n, "family %d", ss->ss_family); return out; }
+    const struct sockaddr_in *in = (const struct sockaddr_in *)ss; char ip[INET_ADDRSTRLEN];
+    snprintf(out, n, "%s:%u", inet_ntop(AF_INET, &in->sin_addr, ip, sizeof ip), ntohs(in->sin_port)); return out;
+}
 // DM_NEXTENDO_TRACE=1: every socket call with its arguments, result and errno (the guest's numbering), to see where a game's online step stops
 int dmo_trace(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NEXTENDO_TRACE"); v = e && *e == '1'; } return v; }
 #define TRACE(...) do { if (dmo_trace()) LOG("[online] trace " __VA_ARGS__); } while (0)
@@ -105,16 +111,63 @@ static void trace_callers(const char *what) {
     }
     LOG("[online] trace %s", line);
 }
+// UDP sockets parked across Pia's close-and-rebind (Ryujinx-Nextendo's NextendoUdpPortKeeper): Pia checks the NAT on one UDP socket, closes it and binds
+// a new one to the same port for the match. The NAT mapping the check server saw belongs to the closed socket, so the address the matchmaking server hands
+// the peer was dead, and Smash's quickplay ended in a communication error (2618-0006). A bound, unconnected UDP socket the game closes is held for
+// PARK_MS instead, and a bind of a new UDP socket to the same port takes it back. At most PARK_MAX ports; anything else closes as before
+enum { PARK_MAX = 8, PARK_MS = 5000 };
+static struct { int port, fd; uint64_t until; } g_park[PARK_MAX];
+static pthread_mutex_t g_park_m = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t park_now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000; }
+static void park_expire(uint64_t now) {   // with g_park_m held
+    for (int i = 0; i < PARK_MAX; i++) if (g_park[i].port && g_park[i].until <= now) { close(g_park[i].fd); TRACE("released parked udp/%d", g_park[i].port); g_park[i].port = 0; }
+}
+static int udp_port(int h) {   // the local port of a bound, unconnected IPv4 UDP socket, else 0
+    int type = 0; socklen_t l = sizeof type; struct sockaddr_in in; socklen_t il = sizeof in; struct sockaddr_storage peer; socklen_t pl = sizeof peer;
+    if (getsockopt(h, SOL_SOCKET, SO_TYPE, &type, &l) || type != SOCK_DGRAM) return 0;
+    if (!getpeername(h, (struct sockaddr *)&peer, &pl)) return 0;   // connected: a real teardown
+    if (getsockname(h, (struct sockaddr *)&in, &il) || in.sin_family != AF_INET) return 0;
+    return ntohs(in.sin_port);
+}
+static int park(int h, int port) {
+    pthread_mutex_lock(&g_park_m);
+    uint64_t now = park_now(); park_expire(now);
+    int k = -1;
+    for (int i = 0; i < PARK_MAX && k < 0; i++) if (g_park[i].port == port) { close(g_park[i].fd); k = i; }   // the newer socket carries the mapping in use
+    for (int i = 0; i < PARK_MAX && k < 0; i++) if (!g_park[i].port) k = i;
+    if (k >= 0) { g_park[k].port = port; g_park[k].fd = h; g_park[k].until = now + PARK_MS; }
+    pthread_mutex_unlock(&g_park_m);
+    return k >= 0;
+}
+static int unpark(int port) {   // the host socket parked on this port, or -1
+    int fd = -1;
+    pthread_mutex_lock(&g_park_m);
+    park_expire(park_now());
+    for (int i = 0; i < PARK_MAX; i++) if (g_park[i].port == port) { fd = g_park[i].fd; g_park[i].port = 0; break; }
+    pthread_mutex_unlock(&g_park_m);
+    return fd;
+}
 int dmo_close(int g) {
     HOST_OR_EBADF(g);
     if (dmo_trace()) { char w[32]; snprintf(w, sizeof w, "close %d", g); trace_callers(w); }
     atomic_store(&g_fd[g], 0);
+    int port = udp_port(h);
+    if (port && park(h, port)) { TRACE("parked udp/%d to keep its NAT mapping", port); return 0; }
     return (int)ok_or_fail(close(h));
 }
 int dmo_shutdown(int g, int how) { HOST_OR_EBADF(g); return (int)ok_or_fail(shutdown(h, how)); }
 int dmo_bind(int g, const void *a, unsigned n) {
-    HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, n);
-    return (int)ok_or_fail(bind(h, (struct sockaddr *)&ss, len));
+    HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, n); char w[64];
+    int type = 0; socklen_t tl = sizeof type; unsigned port = ss.ss_family == AF_INET ? ntohs(((struct sockaddr_in *)&ss)->sin_port) : 0;
+    int kept = port && !getsockopt(h, SOL_SOCKET, SO_TYPE, &type, &tl) && type == SOCK_DGRAM ? unpark((int)port) : -1;
+    if (kept >= 0) {   // the parked socket, already bound there, in place of this one; it takes this one's blocking mode
+        int fl = fcntl(kept, F_GETFL);
+        if (fl >= 0) fcntl(kept, F_SETFL, (fl & ~O_NONBLOCK) | (fcntl(h, F_GETFL) & O_NONBLOCK));
+        atomic_store(&g_fd[g], kept + 1); close(h);
+        TRACE("bind %d to %s: the parked udp/%u socket, its NAT mapping kept", g, sa_str(&ss, w, sizeof w), port);
+        return 0;
+    }
+    return (int)TRACED(ok_or_fail(bind(h, (struct sockaddr *)&ss, len)), "bind %d to %s", g, sa_str(&ss, w, sizeof w));
 }
 int dmo_connect(int g, const void *a, unsigned n) {
     HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, n);
@@ -175,15 +228,16 @@ long dmo_recvfrom(int g, void *b, unsigned long n, int f, void *a, unsigned *al)
     HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sizeof ss;
     long r = BLOCKING(recvfrom(h, b, n, msg_flags(f), a ? (struct sockaddr *)&ss : NULL, a ? &len : NULL));
     if (r < 0) return TRACED(fail(), "recv %d n %lu flags %#x", g, n, f);
+    char w[64]; if (dmo_trace()) { if (a) sa_str(&ss, w, sizeof w); else strlcpy(w, "connected peer", sizeof w); }
     if (a) sa_out(a, al, &ss, len);
-    TRACE("recv %d n %lu flags %#x → %ld", g, n, f, r);
+    TRACE("recv %d n %lu flags %#x → %ld from %s", g, n, f, r, w);
     return r;
 }
 long dmo_sendto(int g, const void *b, unsigned long n, int f, const void *a, unsigned al) {
     HOST_OR_EBADF(g);
     if (!a) return TRACED(ok_or_fail(BLOCKING(send(h, b, n, msg_flags(f)))), "send %d n %lu flags %#x", g, n, f);
-    struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, al);
-    return TRACED(ok_or_fail(BLOCKING(sendto(h, b, n, msg_flags(f), (struct sockaddr *)&ss, len))), "sendto %d n %lu flags %#x", g, n, f);
+    struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, al); char w[64];
+    return TRACED(ok_or_fail(BLOCKING(sendto(h, b, n, msg_flags(f), (struct sockaddr *)&ss, len))), "sendto %d n %lu flags %#x to %s", g, n, f, sa_str(&ss, w, sizeof w));
 }
 
 // poll: the guest's pollfd is the Mac's; descriptors are translated, a negative one is ignored and an unknown one reports POLLNVAL, as on Horizon

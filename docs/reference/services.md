@@ -565,6 +565,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### Play history online
+
+- **Symptom:** Super Smash Bros. Ultimate's Arena and Quickplay joined the match session on Nextendo, then left it at once with "communication error"; the log shows no error line.
+- **Cause:** before it connects to the players it met, the game asks for a play-history key (`friends::GetPlayHistoryRegistrationKey`, `main+0x1937b0`); the host's friends calls answered "unavailable", and the join aborted (result 0x10c08, then 0x6c65 on the join operation).
+- **Fix:** with `DM_NEXTENDO=1`, `GetPlayHistoryRegistrationKey` returns a key (type 0x101, the local flag, the user ID; unsigned) and both `AddPlayHistory` overloads succeed without recording (`hle_friends.c`, `hle_offline.c`). Offline they still fail.
+- **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) 13.0.5, online on Nextendo.
+- **Note:** online, `account::GetNickname` returns the Nextendo name unless `DM_NICK` is set (other players saw "Player").
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.
@@ -586,6 +594,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** abort in `nn::sm::Initialize` under `nn::pctl::IsFreeCommunicationAvailable` (Engage, entering its first battle map).
 - **Cause:** the SDK connects to the parental-control service through `sm`.
 - **Fix:** the host answers it like the other free-communication calls: not available (`hle_misc.c`). `pctl::CheckFreeCommunicationPermission`: never.
+- **Online:** with `DM_NEXTENDO=1` the three free-communication calls answer yes, as a console without parental controls does (Super Smash Bros. Ultimate asks before and after an online match).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (`CheckFreeCommunicationPermission`).
 - **Note:** `pctl::CheckStereoVisionPermission` is under [Applet resource user ID, launch parameters and VR mode](#applet-resource-user-id-launch-parameters-and-vr-mode).
 

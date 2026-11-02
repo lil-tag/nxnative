@@ -48,9 +48,10 @@ HLE_FORCE("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", "gets the Ui
     out->v[0] = h->v[0]; out->v[1] = h->v[1]; return RES_OK;
 }
 // nn::account::Nickname = struct { char name[33]; }, UTF-8
-HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickname; taken from DM_NICK", Result, h_acc_GetNick, char *nick, const Uid *uid) {
+HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickname; DM_NICK, else the Nextendo name when signed in, else Player", Result, h_acc_GetNick, char *nick, const Uid *uid) {
     (void)uid;
     const char *e = getenv("DM_NICK");
+    if (!e && dm_online() && dmo_signed_in() && dmo_name()[0]) e = dmo_name();   // online, the name other players see (Smash showed "Player" in lobbies)
     memset(nick, 0, 33); strncpy(nick, e ? e : "Player", 32);
     return RES_OK;
 }

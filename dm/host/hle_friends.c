@@ -2,6 +2,8 @@
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
 // Return convention: Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
+#include "online.h"
+#include <string.h>
 
 // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
 static _Alignas(16) uint8_t g_ev_notify[0x100], g_ev_invite[0x100];
@@ -26,10 +28,16 @@ HLE_FORCE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS
           Result, h_fr_GetProfileList, void *ctx, void *out, const void *uid, const void *ids, int n) { (void)ctx; (void)out; (void)uid; (void)ids; (void)n; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends16UpdateFriendInfoEPNS0_6FriendERKNS_7account3UidEPKNS3_23NetworkServiceAccountIdEi", "friend info update fails (cut)",
           Result, h_fr_UpdateFriendInfo, void *f, const void *uid, const void *ids, int n) { (void)f; (void)uid; (void)ids; (void)n; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", "play history is not registered (cut)",
-          Result, h_fr_AddPlayHistory, const void *k, const void *a, const void *b) { (void)k; (void)a; (void)b; return RES_FAIL; }
-HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "play history key unavailable (cut)",
-          Result, h_fr_GetPHKey, void *k, const void *uid, int local) { (void)k; (void)uid; (void)local; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", "play history is not registered (cut); online, accepted without recording",
+          Result, h_fr_AddPlayHistory, const void *k, const void *a, const void *b) { (void)k; (void)a; (void)b; return dm_online() ? RES_OK : RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "play history key unavailable (cut); online, an unsigned key",
+          Result, h_fr_GetPHKey, void *k, const void *uid, int local) {
+    // Online, Smash's match join asks for this key before it connects to the players it met and aborts the join when it fails (main+0x1937b0, result 0x10c08 → 0x6c65)
+    // shortcut: a 0x40-byte key with the type (0x101), the local flag and the user ID, no signature; peers only pass it back to AddPlayHistory, which the host answers itself
+    if (!dm_online()) { (void)k; (void)uid; (void)local; return RES_FAIL; }
+    uint8_t *key = k; memset(key, 0, 0x40); key[0] = 0x01; key[1] = 0x01; key[4] = local != 0; if (uid) memcpy(key + 0x10, uid, 16);
+    return RES_OK;
+}
 // Notification queue
 HLE_FORCE("_ZN2nn7friends17NotificationQueueC1Ev", "notification queue creates no session (cut)", void, h_fr_NqCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueueD1Ev", "notification queue has no session to close (cut)", void, h_fr_NqDtor, void *self) { (void)self; }

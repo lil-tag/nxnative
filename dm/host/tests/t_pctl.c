@@ -3,7 +3,8 @@
 #include "../hle_misc.c"
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop and error stand-ins hold the game out of focus
 void dm_applet_leave(void) {}
-int dm_online(void) { return 0; }   // hle_online.c: offline here, so nsd never resolves through Nextendo
+static int g_online;
+int dm_online(void) { return g_online; }   // hle_online.c: offline unless the test turns it on; nsd never resolves through Nextendo here
 uint32_t dmo_nsd_resolve(char *out, const char *in) { (void)out; (void)in; return 0; }
 #include <mach-o/getsect.h>
 
@@ -44,6 +45,11 @@ int main(void) {
         if (check) CHECK(check(args[i]) == 0, "ending communication does not grant permission");
         if (available) CHECK(available() == 0, "permission queries do not make communication available");
     }
+    g_online = 1;   // online play: free communication is allowed, as on a console without parental controls (Smash checks before and after a match)
+    if (check) CHECK(check(0) == 1 && check(1) == 1, "online: the permission query allows communication");
+    if (begin) CHECK(begin(0) == 1, "online: begin agrees");
+    if (available) CHECK(available() == 1, "online: communication available");
+    if (stereo) CHECK(stereo(0) == 0, "online: stereoscopic 3D still not permitted");
     CHECK(unexpected == 0, "no guest symbol lookup or event binding");
     printf("pctl: %d checks, %d failed\n", checks, fails);
     return fails != 0;
