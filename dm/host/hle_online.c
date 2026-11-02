@@ -377,6 +377,24 @@ int dmo_is_server(uint32_t ip) {   // network byte order
     inet_pton(AF_INET, server_ip(0), &a); inet_pton(AF_INET, server_ip(1), &b);
     return ip && (ip == a || ip == b);
 }
+// Addresses of names that were not Nintendo's (looked up on the internet as they are): TLS to them is refused, since Nextendo's certificates are accepted unchecked.
+// Any other address came from Nextendo's own replies: Mario Tennis Aces' game server (144.202.45.50:60010), which Nextendo's login hands out, is not one of its two addresses
+enum { PUBLIC_MAX = 64 };
+static uint32_t g_public[PUBLIC_MAX]; static unsigned g_npublic;
+static pthread_mutex_t g_public_m = PTHREAD_MUTEX_INITIALIZER;
+static void remember_public(const struct addrinfo *ai) {
+    pthread_mutex_lock(&g_public_m);
+    for (; ai; ai = ai->ai_next) if (ai->ai_family == AF_INET) g_public[g_npublic++ % PUBLIC_MAX] = ((const struct sockaddr_in *)ai->ai_addr)->sin_addr.s_addr;
+    pthread_mutex_unlock(&g_public_m);
+}
+int dmo_is_trusted(uint32_t ip) {
+    if (dmo_is_server(ip)) return 1;
+    int pub = 0;
+    pthread_mutex_lock(&g_public_m);
+    for (unsigned i = 0; i < PUBLIC_MAX; i++) pub |= ip == g_public[i];
+    pthread_mutex_unlock(&g_public_m);
+    return ip && !pub;
+}
 // The name a game last looked up for each of Nextendo's addresses: TLS sends it as the server name (SNI), which picks the service behind Nextendo's shared port 443
 static struct { uint32_t ip; char name[256]; } g_last[2];
 static pthread_mutex_t g_last_m = PTHREAD_MUTEX_INITIALIZER;
@@ -419,6 +437,8 @@ int dmo_getaddrinfo(const char *node, const char *service, const void *hints, vo
     if (ip) { h.ai_flags |= AI_NUMERICHOST; remember(ip, name); }
     int r = BLOCKING(getaddrinfo(ip ? ip : node, service, &h, (struct addrinfo **)res));
     if (node) LOG("[online] lookup %s: %s%s", node, r ? gai_strerror(r) : ip ? ip : "resolved", ip ? " (Nextendo)" : "");
+    struct in_addr numeric;
+    if (!r && !ip && node && inet_pton(AF_INET, node, &numeric) != 1) remember_public(*res);
     if (r) *res = NULL;
     return r;   // EAI_* values are BSD's on both
 }

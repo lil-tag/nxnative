@@ -161,7 +161,7 @@ static Result c_handshake(conn_t *c) {
         else if (peer.ss_family == AF_INET6 && IN6_IS_ADDR_V4MAPPED(&s6->sin6_addr)) { memcpy(&p4, s6->sin6_addr.s6_addr + 12, 4); v4 = 1; }
         if (v4) inet_ntop(AF_INET, &p4, ip, sizeof ip);
     }
-    if (!v4 || !dmo_is_server(p4.s_addr)) { LOG("[online] TLS to %s (%s) refused: not a Nextendo server", c->host, ip); return R_ABORT; }
+    if (!v4 || !dmo_is_trusted(p4.s_addr)) { LOG("[online] TLS to %s (%s) refused: not a Nextendo server", c->host, ip); return R_ABORT; }
     char name[256]; struct in_addr numeric;
     if (c->host[0] && inet_pton(AF_INET, c->host, &numeric) != 1) snprintf(name, sizeof name, "%s", c->host);
     else if (!dmo_host_for(p4.s_addr, name, sizeof name)) name[0] = 0;

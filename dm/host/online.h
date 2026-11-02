@@ -29,6 +29,7 @@ int dmo_poll(void *fds, uint64_t n, int ms);
 int dmo_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv);
 const char *dmo_redirect(const char *host);   // Nextendo's address for one of Nintendo's server names, else NULL
 int dmo_is_server(uint32_t ip);               // one of Nextendo's addresses (network byte order)
+int dmo_is_trusted(uint32_t ip);              // a TLS peer: Nextendo's, or an address Nextendo handed out (not one an internet name resolved to)
 int dmo_host_for(uint32_t ip, char *out, unsigned long cap);   // the name last looked up for that address
 int dmo_host_fd(int s);                       // the Mac's descriptor behind a guest one, else -1
 uint32_t dmo_nsd_resolve(char *out, const char *in);

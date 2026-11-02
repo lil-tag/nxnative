@@ -142,10 +142,15 @@ int main(void) {
         h_ssl_CnDestroy(cn); dmo_close(g6);
     }
 
-    // the same server, but not one of Nextendo's addresses: refused before any TLS
+    // the same server, not one of Nextendo's two addresses: an address the game was handed (Mario Tennis Aces' game server, from Nextendo's login) is trusted,
+    // and refused before any TLS once an internet name resolved to it
     unsetenv("DM_NEXTENDO_SERVER");
     g = guest_connect(port);
-    CHECK(h_ssl_CnCreate(cn, ctx) == RES_OK && h_ssl_CnSock(cn, g) == RES_OK && h_ssl_CnHandshake(cn) == R_ABORT, "TLS to any other address is refused");
+    CHECK(h_ssl_CnCreate(cn, ctx) == RES_OK && h_ssl_CnSock(cn, g) == RES_OK && h_ssl_CnHandshake(cn) == RES_OK, "TLS to an address no name lookup gave: trusted");
+    h_ssl_CnDestroy(cn); dmo_close(g);
+    void *lh = NULL; CHECK(dmo_getaddrinfo("localhost", NULL, NULL, &lh) == 0, "an internet name resolves as it is"); dmo_freeaddrinfo(lh);
+    g = guest_connect(port);
+    CHECK(h_ssl_CnCreate(cn, ctx) == RES_OK && h_ssl_CnSock(cn, g) == RES_OK && h_ssl_CnHandshake(cn) == R_ABORT, "TLS to an internet name's address is refused");
     st = 9; CHECK(h_ssl_CnGetAlpn(cn, &st, proto, &pn, sizeof proto) == RES_OK && st == 0 && pn == 0, "no protocol without a handshake");
     h_ssl_CnDestroy(cn); dmo_close(g);
 

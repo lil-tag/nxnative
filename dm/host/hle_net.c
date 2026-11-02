@@ -26,6 +26,9 @@ HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "offline: on hold for the fir
 HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: the network is always unavailable", int, h_nifm_Available, void) { if (dm_online()) return 1; return 0; }
 // Returns bool (`and w0, w0, #1`, Metroid Dread's sdk+0x336210): whether the system's network screen resolved the error
 HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "offline: not resolved, shows no system network screen", unsigned, h_nifm_HandleErr, void) { return 0; }
+// The request's result, after the system's network screen when it failed. Mario Tennis Aces goes online only on success (main+0x15de98); left to the SDK it asked the
+// absent nifm service, failed, and the online menu returned to itself
+HLE_FORCE("_ZN2nn4nifm26HandleNetworkRequestResultEv", "offline: the request failed, no system network screen; online, it succeeded", Result, h_nifm_HandleRes, void) { return dm_online() ? RES_OK : RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP", Result, h_nifm_GetIp, uint32_t *a) { if (dm_online()) return dmo_ip_config(a, 0, 0, 0, 0); if (a) *a = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "offline: no proxy setting; online, proxy off", Result, h_nifm_GetProxy, void *p) {
     if (!dm_online()) return RES_FAIL;
@@ -68,6 +71,8 @@ SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { if (dm_online()) ret
 SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { if (dm_online()) return dmo_accept(s, a, n); (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { if (dm_online()) return dmo_close(s); (void)s; return sk_fail(); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { if (dm_online()) return dmo_sockname(s, a, n, 1); (void)s; (void)a; (void)n; return sk_fail(); }
+// Older SDKs' forms (Mario Tennis Aces): the plain sockaddr overload, the same layout
+SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName2, int s, void *a, unsigned *n) { if (dm_online()) return dmo_sockname(s, a, n, 1); (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { if (dm_online()) return dmo_sockname(s, a, n, 0); (void)s; (void)a; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { if (dm_online()) return dmo_getsockopt(s, l, o, v, n); (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
 SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { if (dm_online()) return dmo_setsockopt(s, l, o, v, n); (void)s; (void)l; (void)o; (void)v; (void)n; return sk_fail(); }
@@ -88,6 +93,7 @@ HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolu
 }
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAddrInfo, void *ai) { if (dm_online()) { dmo_freeaddrinfo_nn(ai); return; } (void)ai; }
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution (cut): NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { if (dm_online()) return dmo_gethostbyname(n); (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
+HLE_FORCE("_ZN2nn6socket13GetHostByNameEPKc", "name resolution (cut): NULL", void *, h_sk_GetHostByName, const char *n) { if (dm_online()) return dmo_gethostbyname(n); (void)n; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { if (dm_online()) return dmo_errno(); return t_skerr; }
 // C interface
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { if (dm_online()) return dmo_socket(a, b, c); (void)a; (void)b; (void)c; return sk_fail(); }
@@ -105,6 +111,11 @@ SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { if (dm_online())
 HLE_FORCE("nnsocketRecv", "bsd socket service (cut)", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { if (dm_online()) return dmo_recvfrom(s, b, n, f, 0, 0); (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("nnsocketSend", "bsd socket service (cut)", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { if (dm_online()) return dmo_sendto(s, b, n, f, 0, 0); (void)s; (void)b; (void)n; (void)f; return sk_fail(); }
 HLE_FORCE("nnsocketGetHostByNameWithOptions", "name resolution (cut): NULL", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { if (dm_online()) return dmo_gethostbyname(n); (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
+// A handle that lets a name lookup be cancelled (Mario Tennis Aces). Online lookups here finish before they return, so there is never anything to cancel.
+// shortcut: Cancel does nothing; give lookups a cancel path if one ever has to stop while it waits
+static _Atomic int g_cancel_ids;
+SKF("nnsocketRequestCancelHandle", h_nsk_CancelHandle, void) { if (dm_online()) return atomic_fetch_add(&g_cancel_ids, 1) + 1; return sk_fail(); }
+SKF("nnsocketCancel", h_nsk_Cancel, int id) { if (dm_online()) return 0; (void)id; return sk_fail(); }
 HLE_FORCE("nnsocketGetLastErrno", "socket error code kept by the host", int, h_nsk_GetErrno, void) { if (dm_online()) return dmo_errno(); return t_skerr; }
 HLE_FORCE("nnsocketSetLastErrno", "socket error code kept by the host", void, h_nsk_SetErrno, int e) { if (dm_online()) { dmo_set_errno(e); return; } t_skerr = e; }
 

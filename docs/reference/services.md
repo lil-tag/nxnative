@@ -589,6 +589,13 @@ Most service calls can be found before they crash, before the first boot or the 
   - The server certificate: gRPC does TLS itself (BoringSSL in `main`, over `SendMsg` / `RecvMsg`, not `nn::ssl`) and checks the server against the Nintendo roots, so it read Nextendo's reply and hung up (2321-4992 again). The profile's `patches.py` skips that check on 2.3.0, as Nextendo's own catalog patch for the build does (`mpj-230-certificate`, which Ryujinx-Nextendo and Citron apply).
 - **Found on:** [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md) 2.3.0, online on Nextendo.
 
+### Online on older SDKs
+
+- **Symptom:** Mario Tennis Aces' online menu returned to itself with no message and no network activity; later, after signing in, its game server's TLS was refused ("not a Nextendo server").
+- **Cause:** it asks whether the network request worked with `nifm::HandleNetworkRequestResult` (`main+0x15de98`), which the host did not take over, so the SDK asked the absent nifm service and failed. Its SDK also uses older socket forms: `GetPeerName` with a plain `sockaddr`, `GetHostByName(const char *)`, `nnsocketRequestCancelHandle` / `nnsocketCancel`. And Nextendo's login hands it a game server on another address (144.202.45.50:60010), which the TLS check took for a stranger.
+- **Fix:** with `DM_NEXTENDO=1` (`hle_net.c`, `hle_online.c`, `hle_online_ssl.c`): `HandleNetworkRequestResult` succeeds (offline it fails, as before); the older socket forms go to the same online calls as their newer siblings, and lookups have nothing to cancel (they finish before they return). TLS trusts Nextendo's addresses and any address no internet name lookup produced, which is where Nextendo's replies send a game; an address an internet name resolved to is still refused, since Nextendo's certificates are accepted unchecked.
+- **Found on:** Mario Tennis Aces 3.1.0, online on Nextendo.
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.
