@@ -32,6 +32,7 @@ typedef struct {
     int eof;
     size_t npeek; uint8_t peek[16384];   // read ahead for Peek
     unsigned nreads;   // records read, for the dump
+    uint8_t alpn[64]; unsigned nalpn;   // the protocols the game offers (SetNextAlpnProto), wire format: a length byte before each name
 } conn_t;
 static _Atomic uint64_t g_ids;
 static conn_t *conn(void *self) { return self ? objmap_get(self) : NULL; }
@@ -68,6 +69,62 @@ static OSStatus io_write(SSLConnectionRef ref, const void *data, size_t *len) {
 // ---------- context: nothing to keep; certificates the game imports are not needed for Nextendo's ----------
 Result dmo_ssl_import(uint64_t *id) { if (id) *id = ++g_ids; return RES_OK; }
 
+// ---------- the firmware's root certificates (BuiltInManager) ----------
+// Super Mario Party Jamboree's online library builds its trust store from them (main+0xc74c3c) and parses each one; with none it never connects (error 2321-4992 after the
+// name lookup). They come from the player's firmware as Ryujinx reads them: ssl_TrustedCerts.bdf of the CertStore archive 0100000000000800 (nx_extract --sysdata, as MiiModel),
+// "sslT", a count, entries {id, status, size, offset from the end of the header} and the DER data. The answer is the ssl service's as the SDK hands it on (sdk+0x3cd8c0):
+// 0x18-byte entries {id, status, u64 size, data pointer}, ended by id -1 when all were asked for (an ID -1), then the data, each 4-aligned
+#define SYSDATA_CERTSTORE 0x0100000000000800ull
+static uint8_t *g_bdf; static size_t g_nbdf;
+static pthread_once_t g_bdf_once = PTHREAD_ONCE_INIT;
+static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static void bdf_read(void) {
+    char dir[1024], path[1100]; FILE *f = NULL;
+    if (dm_sysdata_dir(dir, sizeof dir, SYSDATA_CERTSTORE)) { snprintf(path, sizeof path, "%s/ssl_TrustedCerts.bdf", dir); f = fopen(path, "rb"); }
+    if (!f) { LOG("[online] no root certificates: extract the firmware's CertStore (nx_extract --sysdata <Ryujinx>/bis/system/Contents/registered 0100000000000800 <sysdata>/0100000000000800)"); return; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); rewind(f);
+    uint8_t *b = n > 8 ? malloc((size_t)n) : NULL;
+    if (b && fread(b, 1, (size_t)n, f) == (size_t)n && !memcmp(b, "sslT", 4) && 8 + (uint64_t)rd32(b + 4) * 16 <= (uint64_t)n) {
+        int ok = 1;
+        for (uint32_t i = 0; i < rd32(b + 4); i++) ok &= 8 + (uint64_t)rd32(b + 8 + 16 * i + 12) + rd32(b + 8 + 16 * i + 8) <= (uint64_t)n;
+        if (ok) { g_bdf = b; g_nbdf = (size_t)n; b = NULL; }
+    }
+    if (b || !g_bdf) LOG("[online] root certificates: %s is not a certificate store", path);
+    free(b); fclose(f);
+}
+// buf NULL: only the size the answer needs
+static Result builtin(uint8_t *buf, size_t cap, const int32_t *ids, unsigned n, uint32_t *need, uint32_t *written) {
+    pthread_once(&g_bdf_once, bdf_read);
+    if (!g_bdf) return RES_FAIL;
+    uint32_t count = rd32(g_bdf + 4); int all = 0;
+    for (unsigned i = 0; ids && i < n; i++) all |= ids[i] == -1;
+    unsigned ne = all ? count : n;
+    for (int pass = 0; pass < 2; pass++) {
+        size_t at = (size_t)(ne + all) * 0x18;
+        for (unsigned i = 0; i < ne; i++) {
+            const uint8_t *e = all ? g_bdf + 8 + 16 * i : NULL;
+            for (uint32_t j = 0; !e && j < count; j++) if ((int32_t)rd32(g_bdf + 8 + 16 * j) == ids[i]) e = g_bdf + 8 + 16 * j;
+            if (!e) return RES_FAIL;   // a certificate this firmware does not have
+            uint32_t sz = rd32(e + 8);
+            if (pass) {
+                uint8_t *o = buf + 0x18 * i, *d = buf + at; uint64_t s64 = sz;
+                memcpy(o, e, 8); memcpy(o + 8, &s64, 8); memcpy(d, g_bdf + 8 + rd32(e + 12), sz); memcpy(o + 0x10, &d, 8);
+            }
+            at += (sz + 3) & ~3u;
+        }
+        if (!pass) { if (need) *need = (uint32_t)at; if (!buf) return RES_OK; if (cap < at) return RES_FAIL; continue; }
+        if (all) { memset(buf + 0x18 * ne, 0, 0x18); memset(buf + 0x18 * ne, 0xff, 4); }
+        if (written) *written = ne + all;
+    }
+    return RES_OK;
+}
+Result dmo_ssl_builtin_size(uint32_t *out, const int32_t *ids, unsigned n) { uint32_t need = 0; Result r = builtin(NULL, 0, ids, n, &need, NULL); if (out) *out = r ? 0 : need; return r; }
+Result dmo_ssl_builtin(void **out, uint8_t *buf, unsigned cap, const int32_t *ids, unsigned n) {
+    Result r = builtin(buf, cap, ids, n, NULL, NULL);
+    if (out) *out = r ? NULL : buf;
+    return r;
+}
+
 // ---------- connection ----------
 static Result c_create(void *self) {
     conn_t *c = calloc(1, sizeof *c);
@@ -96,12 +153,18 @@ static Result c_set_socket(conn_t *c, int gfd) {
 static Result c_handshake(conn_t *c) {
     if (dmo_trace()) LOG("[online] trace TLS handshake on socket %d (host %s)", c->gfd, c->host);
     if (c->fd < 0) return R_NO_SOCKET;
-    struct sockaddr_in peer = {0}; socklen_t len = sizeof peer; char ip[INET_ADDRSTRLEN] = "?";
-    if (getpeername(c->fd, (struct sockaddr *)&peer, &len) == 0 && peer.sin_family == AF_INET) inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
-    if (peer.sin_family != AF_INET || !dmo_is_server(peer.sin_addr.s_addr)) { LOG("[online] TLS to %s (%s) refused: not a Nextendo server", c->host, ip); return R_ABORT; }
+    // the peer's IPv4 address, also behind an IPv6 socket (gRPC, Super Mario Party Jamboree, connects dual-stack sockets to ::ffff:a.b.c.d once its IPv6 check passes)
+    struct sockaddr_storage peer = {0}; socklen_t len = sizeof peer; char ip[INET_ADDRSTRLEN] = "?"; struct in_addr p4 = {0}; int v4 = 0;
+    if (getpeername(c->fd, (struct sockaddr *)&peer, &len) == 0) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&peer;
+        if (peer.ss_family == AF_INET) { p4 = ((const struct sockaddr_in *)&peer)->sin_addr; v4 = 1; }
+        else if (peer.ss_family == AF_INET6 && IN6_IS_ADDR_V4MAPPED(&s6->sin6_addr)) { memcpy(&p4, s6->sin6_addr.s6_addr + 12, 4); v4 = 1; }
+        if (v4) inet_ntop(AF_INET, &p4, ip, sizeof ip);
+    }
+    if (!v4 || !dmo_is_server(p4.s_addr)) { LOG("[online] TLS to %s (%s) refused: not a Nextendo server", c->host, ip); return R_ABORT; }
     char name[256]; struct in_addr numeric;
     if (c->host[0] && inet_pton(AF_INET, c->host, &numeric) != 1) snprintf(name, sizeof name, "%s", c->host);
-    else if (!dmo_host_for(peer.sin_addr.s_addr, name, sizeof name)) name[0] = 0;
+    else if (!dmo_host_for(p4.s_addr, name, sizeof name)) name[0] = 0;
     c->tls = SSLCreateContext(NULL, kSSLClientSide, kSSLStreamType);
     if (!c->tls) return R_ABORT;
     SSLSetIOFuncs(c->tls, io_read, io_write);
@@ -110,6 +173,14 @@ static Result c_handshake(conn_t *c) {
     SSLSetSessionOption(c->tls, kSSLSessionOptionBreakOnServerAuth, true);
     SSLSetProtocolVersionMin(c->tls, kTLSProtocol1);
     SSLSetProtocolVersionMax(c->tls, kTLSProtocol12);
+    if (c->nalpn) {   // offered only when the game asks, as Ryujinx-Nextendo does for npln: gRPC needs h2, while NEX's WebSocket upgrade needs http/1.1
+        CFMutableArrayRef protos = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+        for (unsigned i = 0; i < c->nalpn && i + 1 + c->alpn[i] <= c->nalpn; i += 1 + c->alpn[i]) {
+            CFStringRef s = CFStringCreateWithBytes(NULL, c->alpn + i + 1, c->alpn[i], kCFStringEncodingASCII, false);
+            if (s) { CFArrayAppendValue(protos, s); CFRelease(s); }
+        }
+        SSLSetALPNProtocols(c->tls, protos); CFRelease(protos);
+    }
     OSStatus st; int timed_out = 0;
     dm_thread_native_wait(1);
     for (;;) {
@@ -205,8 +276,8 @@ SSF("_ZN2nn3ssl7Context12GetContextIdEPm", h_ssl_CtxId, void *self, uint64_t *id
 SSF("_ZN2nn3ssl7Context9SetOptionENS1_13ContextOptionEi", h_ssl_CtxOpt, void *self, int o, int v) { (void)self; (void)o; (void)v; return dm_online() ? RES_OK : RES_FAIL; }
 SSF("_ZN2nn3ssl7Context9GetOptionEPiNS1_13ContextOptionE", h_ssl_CtxGetOpt, void *self, int *v, int o) { (void)self; (void)o; if (!dm_online()) return RES_FAIL; if (v) *v = 0; return RES_OK; }
 SSF("_ZN2nn3ssl7Context12AddPolicyOidEPKcj", h_ssl_CtxPolicy, void *self, const char *oid, unsigned n) { (void)self; (void)oid; (void)n; return dm_online() ? RES_OK : RES_FAIL; }
-SSF("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", h_ssl_BiBufSize, uint32_t *o, void *ids, unsigned n) { (void)ids; (void)n; if (o) *o = 0; return RES_FAIL; }
-SSF("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj", h_ssl_BiCerts, void **o, uint8_t *b, unsigned bs, void *ids, unsigned n) { (void)o; (void)b; (void)bs; (void)ids; (void)n; return RES_FAIL; }
+SSF("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", h_ssl_BiBufSize, uint32_t *o, void *ids, unsigned n) { if (dm_online()) return dmo_ssl_builtin_size(o, ids, n); (void)ids; (void)n; if (o) *o = 0; return RES_FAIL; }
+SSF("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj", h_ssl_BiCerts, void **o, uint8_t *b, unsigned bs, void *ids, unsigned n) { if (dm_online()) return dmo_ssl_builtin(o, b, bs, ids, n); (void)o; (void)b; (void)bs; (void)ids; (void)n; return RES_FAIL; }
 SSF("_ZN2nn3ssl10Connection6CreateEPNS0_7ContextE", h_ssl_CnCreate, void *self, void *ctx) { (void)ctx; return dm_online() ? c_create(self) : RES_FAIL; }
 SSF("_ZN2nn3ssl10Connection7DestroyEv", h_ssl_CnDestroy, void *self) { return dm_online() ? c_destroy(self) : RES_FAIL; }
 SSF("_ZN2nn3ssl10Connection11DoHandshakeEv", h_ssl_CnHandshake, void *self) { ONLINE_CONN(self); return c ? c_handshake(c) : RES_FAIL; }
@@ -258,6 +329,28 @@ SSF("_ZN2nn3ssl10Connection4ReadEPcPij", h_ssl_CnRead3, void *self, char *b, int
 SSF("_ZN2nn3ssl10Connection5WriteEPKcPij", h_ssl_CnWrite3, void *self, const char *b, int *o, unsigned n) { ONLINE_CONN(self); if (!c) { if (o) *o = 0; return RES_FAIL; } return c->last = c_write(c, b, n, o); }
 SSF("_ZN2nn3ssl10Connection7PendingEPi", h_ssl_CnPending, void *self, int *n) { ONLINE_CONN(self); if (n) *n = c ? c_pending(c) : 0; return c ? RES_OK : RES_FAIL; }
 SSF("_ZN2nn3ssl10Connection4PollEPNS1_9PollEventES3_j", h_ssl_CnPoll, void *self, uint32_t *o, uint32_t *i, unsigned t) { ONLINE_CONN(self); if (!c) { (void)i; (void)t; return RES_FAIL; } return c_poll(c, o, i, t); }
+// ALPN (gRPC, Super Mario Party Jamboree's main+0xf9a4f4): the game offers "h2" and "http/1.1", and speaks HTTP/2 when the state is 1 or 3 (negotiated, selected) and the protocol "h2".
+// State 0 = none negotiated
+SSF("_ZN2nn3ssl10Connection16SetNextAlpnProtoEPKhj", h_ssl_CnSetAlpn, void *self, const uint8_t *p, unsigned n) {
+    ONLINE_CONN(self); if (!c) return RES_FAIL;
+    c->nalpn = p && n <= sizeof c->alpn ? n : 0;
+    if (c->nalpn) memcpy(c->alpn, p, n);
+    return RES_OK;
+}
+SSF("_ZN2nn3ssl10Connection16GetNextAlpnProtoEPNS1_14AlpnProtoStateEPhPjj", h_ssl_CnGetAlpn, void *self, int *state, uint8_t *out, uint32_t *n, unsigned cap) {
+    ONLINE_CONN(self); if (!c) return RES_FAIL;
+    CFArrayRef sel = NULL; char name[64] = "";
+    if (c->tls && SSLCopyALPNProtocols(c->tls, &sel) == noErr && sel) {
+        if (CFArrayGetCount(sel) > 0) CFStringGetCString(CFArrayGetValueAtIndex(sel, 0), name, sizeof name, kCFStringEncodingASCII);
+        CFRelease(sel);
+    }
+    size_t len = strlen(name) < cap ? strlen(name) : cap;
+    if (state) *state = len ? 1 : 0;
+    if (out && len) memcpy(out, name, len);
+    if (n) *n = (uint32_t)len;
+    if (dmo_trace()) LOG("[online] trace TLS ALPN on socket %d: %s", c->gfd, len ? name : "none");
+    return RES_OK;
+}
 // The rest of the connection's surface in Smash 13.0.5's sdk, so none of it falls through to the absent ssl service
 SSF("_ZN2nn3ssl10Connection19GetSessionCacheModeEPNS1_16SessionCacheModeE", h_ssl_CnGetCache, void *self, int *m) { ONLINE_CONN(self); if (!c) return RES_FAIL; if (m) *m = c->cache; return RES_OK; }
 SSF("_ZN2nn3ssl10Connection20SetRenegotiationModeENS1_17RenegotiationModeE", h_ssl_CnReneg, void *self, int m) { (void)m; ONLINE_CONN(self); return c ? RES_OK : RES_FAIL; }

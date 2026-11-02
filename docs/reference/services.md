@@ -573,6 +573,22 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) 13.0.5, online on Nextendo.
 - **Note:** online, `account::GetNickname` returns the Nextendo name unless `DM_NICK` is set (other players saw "Player").
 
+### gRPC online (npln)
+
+- **Symptom:** Super Mario Party Jamboree crashed when the player picked online: `[diag] abort` with no message, `FATAL game aborted`, right after the threads `npln-grpc default-executor` and `npln-grpc resolver-executor` start. No name lookup comes first.
+- **Cause:** the game's online library (npln) talks to its servers with gRPC over HTTP/2. gRPC's poller needs an eventfd to wake itself; `nn::socket::EventFd` always failed, so neither poller ("poll", "none") started, and gRPC aborts with "No event engine could be initialized" (`main+0xb2cfc8`). It also reads and writes with `nnsocketSendMsg` / `nnsocketRecvMsg` (cut), reads socket errors from the C library's `errno` rather than `GetLastErrno` (79 reads in `main`), and agrees on HTTP/2 through TLS ALPN (`ssl::Connection::SetNextAlpnProto` / `GetNextAlpnProto`, not taken over, so they reached the absent ssl service).
+- **Fix:** with `DM_NEXTENDO=1` (`hle_online.c`, `hle_net.c`, `hle_offline.c`, `hle_online_ssl.c`, `thread.c`):
+  - `EventFd` / `EventFdRead` / `EventFdWrite`: a counter whose descriptor is a pipe's read end, readable while the counter is above 0, so `Poll` waits on it with the sockets. Always nonblocking (a read at 0 fails with EAGAIN), as Ryujinx-Nextendo has it; the semaphore flag (1) is honoured.
+  - `SendMsg` / `RecvMsg`: the SDK's `msghdr` is BSD's, the Mac's (`main+0xb36324`), so it passes through with only the address translated.
+  - Every online socket error also goes to the SDK's `errno` (`dm_guest_errno`): the thread-local region + the offset in the SDK's own `__errno_location` (`add x0, x8, #0x1d8` in SDKs that define it there). SDKs that import `__errno_location` (Smash, Odyssey) are left as before.
+  - ALPN: the game's offer (`h2`, `http/1.1`) goes to Secure Transport only when the game makes one, so NEX games, whose WebSocket upgrade needs HTTP/1.1, are unchanged; `GetNextAlpnProto` answers state 1 and the protocol the server chose, state 0 when none.
+  - The network clock (`hle_sdk16.c`, `hle_time.c`): with gRPC running, the game still stopped before connecting with its own error (`err::ShowError` 0x2a2), once per try, after `time::AsyncEnsureNetworkClockAvailabilityTask` failed. Online, the task succeeds, `StandardNetworkSystemClock::GetCurrentTime` gives the Mac's time and `IsAccuracySufficient` answers yes.
+  - `nifm::GetCurrentProxySetting` (`hle_net.c`): online, success with the proxy off (all 0xaa bytes cleared), as Ryujinx answers. It failed before, also once per try.
+  - Root certificates (`hle_online_ssl.c`): next the game looked its server up three times and never opened a socket, then showed 2321-4992. It builds its trust store from `ssl::BuiltInManager::GetBuiltInCertificates` (`main+0xc74c3c`) and parses each one; both overloads failed. Online they answer from the player's firmware as Ryujinx does: `ssl_TrustedCerts.bdf` of the CertStore archive `0100000000000800` in the system data folder (`DM_SYSDATA`; the NSP script extracts it with the Mii faces). Entries are 0x18 bytes `{id, status, u64 size, data pointer}`, the SDK's form after it turns the service's offsets into pointers (`sdk+0x3cd8c0`), ended by id -1 when all were asked for.
+  - IPv6: once gRPC's IPv6 check passes it connects dual-stack sockets to `::ffff:a.b.c.d`; the TLS refusal of non-Nextendo peers reads the IPv4 address through the mapping.
+  - The server certificate: gRPC does TLS itself (BoringSSL in `main`, over `SendMsg` / `RecvMsg`, not `nn::ssl`) and checks the server against the Nintendo roots, so it read Nextendo's reply and hung up (2321-4992 again). The profile's `patches.py` skips that check on 2.3.0, as Nextendo's own catalog patch for the build does (`mpj-230-certificate`, which Ryujinx-Nextendo and Citron apply).
+- **Found on:** [Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md) 2.3.0, online on Nextendo.
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.

@@ -4,6 +4,8 @@
 
 void dm_thread_native_wait(int entering) { (void)entering; }
 module_t *module_of(const void *p) { (void)p; return NULL; }   // the trace's caller names (DM_NEXTENDO_TRACE): no game modules here
+static __thread int g_guest_errno;
+int *dm_guest_errno(void) { return &g_guest_errno; }
 
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
@@ -89,6 +91,39 @@ int main(void) {
         dmo_close(u2);
         int t = dmo_socket(AF_INET, SOCK_STREAM, 0); int ht = dmo_host_fd(t);
         CHECK(dmo_close(t) == 0 && fcntl(ht, F_GETFD) < 0, "a TCP socket closes for real");
+    }
+    // gRPC's poller wakeup (Super Mario Party Jamboree): an eventfd polls readable while its counter is above 0, and a failed call leaves its error in the game's errno too
+    {
+        int ev = dmo_eventfd(0, 6); uint64_t v = 0;
+        CHECK(ev >= 3, "eventfd gives a descriptor");
+        sw_pollfd pe = {ev, POLLIN, 0};
+        CHECK(dmo_poll(&pe, 1, 0) == 0, "an eventfd at 0 is not readable");
+        g_guest_errno = 0;
+        CHECK(dmo_eventfd_read(ev, &v) == -1 && dmo_errno() == 11 && g_guest_errno == 11, "reading it at 0 fails with EAGAIN, in the game's errno too");
+        CHECK(dmo_eventfd_write(ev, 1) == 0 && dmo_eventfd_write(ev, 2) == 0, "write");
+        CHECK(dmo_poll(&pe, 1, 0) == 1 && pe.revents & POLLIN, "above 0 it polls readable");
+        CHECK(dmo_eventfd_read(ev, &v) == 0 && v == 3, "a read takes the whole count");
+        CHECK(dmo_poll(&pe, 1, 0) == 0, "back at 0, not readable");
+        int sem = dmo_eventfd(2, 1);
+        CHECK(dmo_eventfd_read(sem, &v) == 0 && v == 1 && dmo_eventfd_read(sem, &v) == 0 && v == 1 && dmo_eventfd_read(sem, &v) == -1, "a semaphore eventfd counts down by 1");
+        int wr = g_evw[ev] - 1;
+        CHECK(dmo_close(ev) == 0 && fcntl(wr, F_GETFD) < 0 && !g_evw[ev], "closing it closes both pipe ends");
+        dmo_close(sem);
+        CHECK(dmo_eventfd_read(a, &v) == -1 && dmo_errno() == 22, "a socket is not an eventfd: EINVAL");
+    }
+    // sendmsg / recvmsg (gRPC's TCP), the SDK's msghdr being the Mac's
+    {
+        int u1 = dmo_socket(AF_INET, SOCK_DGRAM, 17), u2 = dmo_socket(AF_INET, SOCK_DGRAM, 17);
+        uint8_t lo[16] = {0, AF_INET, 0, 0, 127, 0, 0, 1}, at[16]; unsigned al = sizeof at;
+        dmo_bind(u1, lo, sizeof lo); dmo_sockname(u1, at, &al, 0);
+        char p1[] = "nex", p2[] = "tendo", got[16] = {0};
+        struct iovec out[2] = {{p1, 3}, {p2, 5}}, in = {got, sizeof got};
+        struct msghdr sm = {.msg_name = at, .msg_namelen = 16, .msg_iov = out, .msg_iovlen = 2};
+        CHECK(dmo_sendmsg(u2, &sm, 0) == 8, "sendmsg gathers two buffers to an address");
+        uint8_t from[16] = {0}; struct msghdr rm = {.msg_name = from, .msg_namelen = sizeof from, .msg_iov = &in, .msg_iovlen = 1};
+        CHECK(dmo_recvmsg(u1, &rm, 0) == 8 && !memcmp(got, "nextendo", 8) && rm.msg_namelen == 16 && from[1] == AF_INET && from[0] == 0, "recvmsg gets them and the sender, length byte 0");
+        CHECK(dmo_recvmsg(u1, &rm, MSG_DONTWAIT) == -1 && g_guest_errno == 11, "an empty receive fails with EAGAIN in the game's errno");
+        dmo_close(u1); dmo_close(u2);
     }
     printf("t_online: %d checks, %d failed\n", checks, fails);
     return fails != 0;

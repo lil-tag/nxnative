@@ -4,6 +4,8 @@
 #include <mach-o/getsect.h>
 
 uint64_t guest_ns(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static int g_online;
+int dm_online(void) { return g_online; }
 static int checks, fails;
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
@@ -69,6 +71,9 @@ int main(void) {
     b[0x10] ^= 1; CHECK(udiff(a, b) == 0, "user contexts of different steady sources: 0");
     b[0x10] ^= 1; a[0xcc] = b[0xcc] = 1; CHECK(udiff(a, b) == 0, "automatic correction on in both: 0");
     a[0xcc] = 0; CHECK(udiff(a, b) == 3600 * 1000000000LL, "automatic correction in one only: the difference");
+    unsigned (*accurate)(void) = hook("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv");
+    CHECK(accurate && !accurate(), "offline the network clock is never accurate enough");
+    g_online = 1; CHECK(accurate && accurate(), "online it is (Super Mario Party Jamboree's npln asks)");
     printf("time: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

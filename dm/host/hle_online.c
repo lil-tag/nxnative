@@ -43,7 +43,9 @@ static int lx_errno(int e) {
     case EINPROGRESS: return 115; default: return e;   // 1-34 are the same on both
     }
 }
-static long fail(void) { t_err = lx_errno(errno); return -1; }
+// The bsd client also leaves the error in the C library's errno, which gRPC reads (Super Mario Party Jamboree)
+static void set_err(int e) { t_err = e; int *g = dm_guest_errno(); if (g) *g = e; }
+static long fail(void) { set_err(lx_errno(errno)); return -1; }
 static const char *sa_str(const struct sockaddr_storage *ss, char *out, size_t n) {   // "a.b.c.d:port" for the trace
     if (ss->ss_family != AF_INET) { snprintf(out, n, "family %d", ss->ss_family); return out; }
     const struct sockaddr_in *in = (const struct sockaddr_in *)ss; char ip[INET_ADDRSTRLEN];
@@ -55,7 +57,7 @@ int dmo_trace(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM
 #define TRACED(r, ...) ({ long r_t = (r); TRACE(__VA_ARGS__); TRACE("  → %ld (errno %d)", r_t, r_t < 0 ? t_err : 0); r_t; })
 static long ok_or_fail(long r) { return r < 0 ? fail() : r; }
 int dmo_errno(void) { return t_err; }
-void dmo_set_errno(int e) { t_err = e; }
+void dmo_set_errno(int e) { set_err(e); }
 
 // A call that can wait (connect, accept, receive, send, poll, a name lookup) is a guest blocking boundary: the thread gives its core back while it waits
 #define BLOCKING(expr) ({ dm_thread_native_wait(1); __typeof__(expr) r_ = (expr); int e_ = errno; dm_thread_native_wait(0); errno = e_; r_; })
@@ -63,12 +65,16 @@ void dmo_set_errno(int e) { t_err = e; }
 // ---------- descriptors: guest 3..1023 → the Mac's ----------
 enum { GFD_MAX = 1024, SW_O_NONBLOCK = 0x800, SW_AF_INET6 = 28 };
 static _Atomic int g_fd[GFD_MAX];   // host descriptor + 1; 0 = free
+static int g_evw[GFD_MAX];          // eventfd descriptors (dmo_eventfd): the pipe's write end + 1; 0 = a socket
+static uint64_t g_evv[GFD_MAX];     // their counters
+static uint8_t g_evsem[GFD_MAX];
+static pthread_mutex_t g_ev_m = PTHREAD_MUTEX_INITIALIZER;
 static int fd_host(int g) { return g >= 0 && g < GFD_MAX ? atomic_load(&g_fd[g]) - 1 : -1; }
 static int fd_adopt(int h) {
     for (int g = 3; g < GFD_MAX; g++) { int z = 0; if (atomic_compare_exchange_strong(&g_fd[g], &z, h + 1)) return g; }
-    close(h); t_err = 24; return -1;   // EMFILE
+    close(h); set_err(24); return -1;   // EMFILE
 }
-#define HOST_OR_EBADF(g) int h = fd_host(g); if (h < 0) { t_err = 9; return -1; }
+#define HOST_OR_EBADF(g) int h = fd_host(g); if (h < 0) { set_err(9); return -1; }
 
 // The guest's sockaddr is BSD's (sin_len, sin_family); a game may leave sin_len at 0, so it is set from the family
 static socklen_t sa_in(struct sockaddr_storage *ss, const void *a, unsigned n) {
@@ -107,7 +113,8 @@ static void trace_callers(const char *what) {
     for (int i = 0; i < 24 && fp && !((uintptr_t)fp & 7) && found < 6; i++) {
         void *ra = fp[1]; module_t *m = module_of(ra);
         if (m && o < (int)sizeof line - 40) { o += snprintf(line + o, sizeof line - o, " %s+%#llx", m->name, (unsigned long long)((uint8_t *)ra - m->base)); found++; }
-        void **up = fp[0]; if (up <= fp) break; fp = up;
+        // a game frame without a frame pointer leaves anything here (Jamboree's gRPC close, main+0xb63e38: 0xc21db233bb010210): stop at one that is no stack address above this one
+        void **up = fp[0]; if (up <= fp || (uintptr_t)up - (uintptr_t)fp > (64u << 20)) break; fp = up;
     }
     LOG("[online] trace %s", line);
 }
@@ -150,6 +157,7 @@ static int unpark(int port) {   // the host socket parked on this port, or -1
 int dmo_close(int g) {
     HOST_OR_EBADF(g);
     if (dmo_trace()) { char w[32]; snprintf(w, sizeof w, "close %d", g); trace_callers(w); }
+    if (g_evw[g]) { pthread_mutex_lock(&g_ev_m); close(g_evw[g] - 1); g_evw[g] = 0; atomic_store(&g_fd[g], 0); pthread_mutex_unlock(&g_ev_m); return (int)ok_or_fail(close(h)); }   // an eventfd
     atomic_store(&g_fd[g], 0);
     int port = udp_port(h);
     if (port && park(h, port)) { TRACE("parked udp/%d to keep its NAT mapping", port); return 0; }
@@ -174,6 +182,9 @@ int dmo_connect(int g, const void *a, unsigned n) {
     if (ss.ss_family == AF_INET) {
         const struct sockaddr_in *in = (const struct sockaddr_in *)&ss; char ip[INET_ADDRSTRLEN];
         LOG("[online] connect %d to %s:%u", g, inet_ntop(AF_INET, &in->sin_addr, ip, sizeof ip), ntohs(in->sin_port));
+    } else if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *in = (const struct sockaddr_in6 *)&ss; char ip[INET6_ADDRSTRLEN];
+        LOG("[online] connect %d to [%s]:%u", g, inet_ntop(AF_INET6, &in->sin6_addr, ip, sizeof ip), ntohs(in->sin6_port));
     }
     return (int)TRACED(ok_or_fail(BLOCKING(connect(h, (struct sockaddr *)&ss, len))), "connect %d", g);
 }
@@ -239,12 +250,63 @@ long dmo_sendto(int g, const void *b, unsigned long n, int f, const void *a, uns
     struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, al); char w[64];
     return TRACED(ok_or_fail(BLOCKING(sendto(h, b, n, msg_flags(f), (struct sockaddr *)&ss, len))), "sendto %d n %lu flags %#x to %s", g, n, f, sa_str(&ss, w, sizeof w));
 }
+// sendmsg / recvmsg (gRPC's TCP reads and writes): the SDK's msghdr is BSD's, the Mac's (Jamboree's main+0xb36324: iovlen at +0x18, controllen at +0x28, flags at +0x2c); only the address is translated
+long dmo_sendmsg(int g, const void *msg, int f) {
+    HOST_OR_EBADF(g); struct msghdr m = *(const struct msghdr *)msg; struct sockaddr_storage ss;
+    if (m.msg_name) { m.msg_namelen = sa_in(&ss, m.msg_name, m.msg_namelen); m.msg_name = &ss; }
+    return TRACED(ok_or_fail(BLOCKING(sendmsg(h, &m, msg_flags(f)))), "sendmsg %d iov %d flags %#x", g, (int)m.msg_iovlen, f);
+}
+long dmo_recvmsg(int g, void *msg, int f) {
+    HOST_OR_EBADF(g); struct msghdr *gm = msg, m = *gm; struct sockaddr_storage ss;
+    if (m.msg_name) { m.msg_name = &ss; m.msg_namelen = sizeof ss; }
+    long r = BLOCKING(recvmsg(h, &m, msg_flags(f)));
+    if (r < 0) return TRACED(fail(), "recvmsg %d flags %#x", g, f);
+    if (gm->msg_name) sa_out(gm->msg_name, &gm->msg_namelen, &ss, m.msg_namelen);
+    gm->msg_controllen = m.msg_controllen; gm->msg_flags = m.msg_flags;
+    TRACE("recvmsg %d flags %#x → %ld", g, f, r);
+    return r;
+}
+
+// eventfd (gRPC's poller wakeup, Jamboree's main+0xb3a080): a counter whose descriptor polls readable while it is above 0. The Mac has none, so the descriptor is a pipe's read end
+// holding one byte while the counter is above 0. Always nonblocking, as Ryujinx-Nextendo has it: a read at 0 fails with EAGAIN. Flags: 1 semaphore (reads take 1), 4 nonblocking
+int dmo_eventfd(uint64_t v, int flags) {
+    int p[2]; if (pipe(p)) return (int)fail();
+    fcntl(p[0], F_SETFL, O_NONBLOCK); fcntl(p[1], F_SETFL, O_NONBLOCK);
+    pthread_mutex_lock(&g_ev_m);
+    int g = fd_adopt(p[0]);
+    if (g >= 0) { g_evw[g] = p[1] + 1; g_evv[g] = v; g_evsem[g] = flags & 1; if (v) (void)!write(p[1], "", 1); } else close(p[1]);
+    pthread_mutex_unlock(&g_ev_m);
+    TRACE("eventfd %llu flags %#x → %d", (unsigned long long)v, flags, g);
+    return g;
+}
+int dmo_eventfd_read(int g, uint64_t *v) {
+    HOST_OR_EBADF(g);
+    pthread_mutex_lock(&g_ev_m);
+    int e = !g_evw[g] ? 22 : !g_evv[g] ? 11 : 0;   // EINVAL, EAGAIN
+    if (!e) {
+        uint64_t n = g_evsem[g] ? 1 : g_evv[g];
+        if (!(g_evv[g] -= n)) { char b[16]; while (read(h, b, sizeof b) > 0) {} }
+        if (v) *v = n;
+    }
+    pthread_mutex_unlock(&g_ev_m);
+    if (e) { set_err(e); return -1; }
+    return 0;
+}
+int dmo_eventfd_write(int g, uint64_t v) {
+    HOST_OR_EBADF(g); (void)h;
+    pthread_mutex_lock(&g_ev_m);
+    int e = !g_evw[g] || v == UINT64_MAX ? 22 : g_evv[g] + v < g_evv[g] || g_evv[g] + v == UINT64_MAX ? 11 : 0;
+    if (!e) { if (!g_evv[g] && v) (void)!write(g_evw[g] - 1, "", 1); g_evv[g] += v; }
+    pthread_mutex_unlock(&g_ev_m);
+    if (e) { set_err(e); return -1; }
+    return 0;
+}
 
 // poll: the guest's pollfd is the Mac's; descriptors are translated, a negative one is ignored and an unknown one reports POLLNVAL, as on Horizon
 typedef struct { int32_t fd; int16_t events, revents; } sw_pollfd;
 int dmo_poll(void *fds, uint64_t n, int ms) {
     sw_pollfd *p = fds; struct pollfd stack[64], *q = n <= 64 ? stack : calloc(n, sizeof *q);
-    if (!q) { t_err = 12; return -1; }
+    if (!q) { set_err(12); return -1; }
     int bad = 0;
     for (uint64_t i = 0; i < n; i++) {
         q[i].fd = p[i].fd < 0 ? -1 : fd_host(p[i].fd); q[i].events = p[i].events; q[i].revents = 0;

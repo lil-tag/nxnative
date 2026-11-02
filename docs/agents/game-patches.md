@@ -92,6 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Super Mario Party Jamboree](#super-mario-party-jamboree) | 1 | 0 | 0 | 0 | 0 | `build` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 5 | 0 | 0 | `build` → `game` ×2 |
@@ -467,6 +468,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.23.55063 `main`** `5b050c55…` ([patches.py:14](../../dm/games/010014C011146000/patches.py#L14))
   - cut `+0x6517f4`: BucketAllocator ALLOC_BUCKET: at most 255 blocks of 4 MB (a 1 GB address region) → 63 (256 MB)
+
+### Super Mario Party Jamboree
+
+[Super Mario Party Jamboree](../../dm/games/0100965017338000/README.md), `0100965017338000`, [patches.py](../../dm/games/0100965017338000/patches.py).
+
+- **`build`**, runtime, at goal, checked: the original instruction at main+0xad38bc of 2.3.0 is the guard in the catalog, and the code around it is the verify-callback choice: gRPC's server certificate check skipped. Online play on Nextendo; Nextendo's catalog publishes it per build, so a new game build gets its own entry there
+
+- **2.3.0 `main`** `d70ce172…` ([patches.py:9](../../dm/games/0100965017338000/patches.py#L9))
+  - cut `+0xad38bc`: gRPC server certificate check: ldrb w10, [x21, #0x38] → mov w10, #1 (skip it; Nextendo signs its own)
 
 ### Super Smash Bros. Ultimate
 

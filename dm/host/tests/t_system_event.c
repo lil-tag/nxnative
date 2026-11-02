@@ -35,6 +35,7 @@ static int test_sleep(const struct timespec *ts, struct timespec *left) {
 #define pthread_detach test_detach
 #define nanosleep test_sleep
 #include "../hle_sdk16.c"
+int dm_online(void) { return 0; }   // offline: online play is t_online*.c's
 #undef pthread_create
 #undef pthread_detach
 #undef nanosleep

@@ -29,6 +29,20 @@ void guest_thread_init(void) {
 // The thread's kernel ID at TLR[0x110], the one svcGetThreadId answers (hle_thread.c's thr_t id, never 0: 0 is the owner word of an unlocked mutex). Without it every
 // unlocked SDK 22 mutex reads as the caller's and the first heap lock aborts (docs/reference/threads.md)
 void guest_thread_set_id(uint64_t id) { *(uint32_t *)((uint8_t *)pthread_getspecific(g_keytlr) + 0x110) = (uint32_t)id; }
+// The SDK C library's errno, where the bsd socket client leaves a failed call's error and gRPC reads it (Super Mario Party Jamboree's main, 79 reads). Newer SDKs keep it in the
+// thread-local region: their __errno_location is `mrs x8, tpidrro_el0; add x0, x8, #0x1d8; ret` (Jamboree, Wonder, Legends Z-A, Tears of the Kingdom), the add read from it here.
+// shortcut: NULL for SDKs that import __errno_location from elsewhere (Smash, Odyssey), whose games read the socket error through GetLastErrno; find theirs if a game needs it
+int *dm_guest_errno(void) {
+    static int off = -1;
+    if (off < 0) {
+        const uint32_t *p = guest_sym("__errno_location"); int o = 0;
+        if (p && (p[0] & 0xfc000000) == 0x14000000) p += (int32_t)(p[0] << 6) >> 6;   // an exported b to the body
+        if (p && (p[1] & 0xffc003ff) == 0x91000100 && p[2] == 0xd65f03c0) o = p[1] >> 10 & 0xfff;   // add x0, x8, #imm; ret
+        off = o;
+    }
+    uint8_t *tlr = off ? pthread_getspecific(g_keytlr) : NULL;
+    return tlr ? (int *)(tlr + off) : NULL;
+}
 
 // Gate stacks (entry.S dm_gate): the SVC gate's register frame and the host's SVC handlers run on a stack of the thread's own, never below the guest's sp, as on Horizon, whose kernel leaves a
 // thread's stack untouched during an SVC. Each thread holds a gate slot k: its KGATE slot points to entry.S stub k, which loads dm_gate_top[k]. A guest thread (hle_thread.c thread_main) runs

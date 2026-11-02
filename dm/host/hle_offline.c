@@ -106,7 +106,7 @@ HLE_FORCE("_ZN2nn3ssl7Context15ImportClientPkiEPmPKcS4_jj", "SSL (cut)", Result,
 HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", "SSL (cut)", Result, h_ssl_ImpSrv, void *self, uint64_t *id, const char *a, unsigned n, int f) { if (dm_online()) return dmo_ssl_import(id); (void)self; (void)a; (void)n; (void)f; if (id) *id = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ssl7Context9ImportCrlEPmPKcj", "SSL (cut)", Result, h_ssl_ImpCrl, void *self, uint64_t *id, const char *a, unsigned n) { if (dm_online()) return dmo_ssl_import(id); (void)self; (void)a; (void)n; if (id) *id = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", "SSL (cut)", Result, h_ssl_Certs,
-          void **out, uint8_t *buf, unsigned bn, void *ids, unsigned n) { (void)buf; (void)bn; (void)ids; (void)n; if (out) *out = NULL; return RES_FAIL; }
+          void **out, uint8_t *buf, unsigned bn, void *ids, unsigned n) { if (dm_online()) return dmo_ssl_builtin(out, buf, bn, ids, n); (void)buf; (void)bn; (void)ids; (void)n; if (out) *out = NULL; return RES_FAIL; }
 
 // ---------- nifm / nsd: offline ----------
 HLE_FORCE("_ZN2nn4nifm19SetLocalNetworkModeEb", "offline: the local network mode switch is ignored", void, h_nifm_LocalMode, unsigned on) { (void)on; }
@@ -172,8 +172,8 @@ HLE_FORCE("_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKN
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
 HLE_FORCE("nnsocketAccept", "offline (cut)", int, h_c_sk_Accept, int s, void *a, unsigned *n) { if (dm_online()) return dmo_accept(s, a, n); (void)s; (void)a; (void)n; return -1; }
 HLE_FORCE("nnsocketListen", "offline (cut)", int, h_c_sk_Listen, int s, int n) { if (dm_online()) return dmo_listen(s, n); (void)s; (void)n; return -1; }
-HLE_FORCE("nnsocketRecvMsg", "offline (cut)", int, h_c_sk_RecvMsg, void) { return -1; }
-HLE_FORCE("nnsocketSendMsg", "offline (cut)", int, h_c_sk_SendMsg, void) { return -1; }
+HLE_FORCE("nnsocketRecvMsg", "offline (cut)", long, h_c_sk_RecvMsg, int s, void *m, int f) { if (dm_online()) return dmo_recvmsg(s, m, f); (void)s; (void)m; (void)f; return -1; }
+HLE_FORCE("nnsocketSendMsg", "offline (cut)", long, h_c_sk_SendMsg, int s, const void *m, int f) { if (dm_online()) return dmo_sendmsg(s, m, f); (void)s; (void)m; (void)f; return -1; }
 HLE_FORCE("nnsocketShutdown", "offline (cut)", int, h_c_sk_Shutdown, int s, int h) { if (dm_online()) return dmo_shutdown(s, h); (void)s; (void)h; return -1; }
 HLE_FORCE("nnsocketGetAddrInfo", "name resolution (cut): EAI_FAIL", int, h_c_sk_Gai, const char *h, const char *s, const void *hint, void **res) { if (dm_online()) return dmo_getaddrinfo(h, s, hint, res); (void)h; (void)s; (void)hint; if (res) *res = NULL; return SK_EAI_FAIL; }
 HLE_FORCE("nnsocketFreeAddrInfo", "pairs with GetAddrInfo (cut)", void, h_c_sk_FreeAi, void *ai) { if (dm_online()) { dmo_freeaddrinfo(ai); return; } (void)ai; }

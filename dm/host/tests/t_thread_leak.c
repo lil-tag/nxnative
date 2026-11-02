@@ -20,6 +20,10 @@ static void t_free(void *p) { if (!p) return; atomic_fetch_sub(&g_live_blocks, 1
 
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 uint64_t dm_gate_top[1024]; const uint8_t dm_gate_stubs[16 * 1024];   // entry.S's gate tables (guest_gate_stack, which this test does not call)
+// dm_guest_errno: the SDK's __errno_location as Super Mario Party Jamboree has it, an exported b to `mrs x8, tpidrro_el0; add x0, x8, #0x1d8; ret`
+static const uint32_t g_errno_code[5] = {0x14000002, 0, 0xd53bd068, 0x91076100, 0xd65f03c0};
+void *guest_sym(const char *name) { return !strcmp(name, "__errno_location") ? (void *)g_errno_code : NULL; }
+static void *errno_thread(void *a) { (void)a; guest_thread_init(); return (int *)((uint8_t *)pthread_getspecific(g_keytlr) + 0x1d8) == dm_guest_errno() ? (void *)1 : NULL; }
 
 static int fails, checks;
 #define EXPECT(name, want, got) do { long w_ = (long)(want), g_ = (long)(got); checks++; printf("%-46s expected %-8ld → got %-8ld %s\n", name, w_, g_, w_ == g_ ? "✓" : "✗"); if (w_ != g_) fails++; } while (0)
@@ -32,5 +36,7 @@ int main(void) {
     EXPECT("bytes requested by 200 threads (200 × 9744)", 1948800, atomic_load(&g_total_bytes));
     EXPECT("blocks still not freed after all exited", 0, atomic_load(&g_live_blocks));
     EXPECT("free calls (3 blocks per thread)", 600, atomic_load(&g_freed_req));
+    void *ok = NULL; pthread_t t; pthread_create(&t, NULL, errno_thread, NULL); pthread_join(t, &ok);
+    EXPECT("the SDK's errno is the thread's region + 0x1d8", 1, ok != NULL);
     printf("t_thread_leak: %d checks, %d failed\n", checks, fails); return fails != 0;
 }

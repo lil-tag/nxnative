@@ -515,6 +515,7 @@ static int sysdata_dir(char *dir, size_t n, uint64_t id) {
     if (id != SYSDATA_MIIMODEL || snprintf(dir, n, "%s_sysdata/%016llx", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), (unsigned long long)id) >= (int)n) return 0;
     return dm_mii_standin(dir);
 }
+int dm_sysdata_dir(char *dir, size_t n, uint64_t id) { return sysdata_dir(dir, n, id); }
 HLE_FORCE("_ZN2nn2fs29QueryMountSystemDataCacheSizeEPmNS_3ncm12SystemDataIdE", "fsp-srv; system data reads the host directory directly, the cache is the size of its RomFS file table", Result, h_fs_QuerySysDataCache, size_t *out, uint64_t id) {
     char dir[1024];
     *out = sysdata_dir(dir, sizeof dir, id) ? romfs_work_size(dir) : 0x1000;
