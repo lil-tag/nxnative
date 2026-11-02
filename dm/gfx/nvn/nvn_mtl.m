@@ -942,7 +942,12 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
     free(lab); atomic_store(&g_gp_busy, 0);
 }
+// The open render encoder of consecutive transform feedback captures (tf_draw): they share it instead of one encoder each. Closed before any other encoder of the main command buffer opens,
+// at a pass end (rp_end) and before the command buffer ends
+static id g_tf_en;
+static void tf_en_close(void) { if (g_tf_en) { id e = g_tf_en; g_tf_en = nil; m4_end(e); } }
 static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) {   // the draw passes (rp_begin_ex); see barrier_game
+    tf_en_close();
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d];
     if (g_last_end_relaxed && !g_game_barrier && barrier_game() && !g_image_heap_n) g_bar_skip++;
     else { [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; g_bar_full++; }
@@ -954,7 +959,7 @@ static inline void enc_r_end_pass(id e) {
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:resource_vis()];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
-static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
+static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { tf_en_close(); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
 static inline void enc_r_pso(id<MTL4RenderCommandEncoder> e, id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }
 static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { [e setDepthStencilState:s]; }
@@ -985,7 +990,7 @@ static inline void enc_r_draw_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimit
 static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
 static inline void enc_r_draw_indexed_indirect(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, MTLIndexType t, uint64_t gpu, NSUInteger len, uint64_t ind) { [e drawIndexedPrimitives:p indexType:t indexBuffer:gpu indexBufferLength:len indirectBuffer:ind]; }
 static void ubd_land_compute(void);
-static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; ubd_land_compute(); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }
+static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; ubd_land_compute(); tf_en_close(); id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_ct]; gp_begin(e, 'C', nil); return e; }
 static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandBuffer> cb) { return [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; }
 static inline void enc_c_end(id e) { m4_end(e); }
 static inline void enc_c_pso(id e, id<MTLComputePipelineState> p) { [e setComputePipelineState:p]; }
@@ -1013,7 +1018,7 @@ static uint64_t g_blit_splits;   // copies / buffer updates / fills that ended a
 uint64_t mtl_blit_splits(void) { return g_blit_splits; }
 static int enc_open(void);
 static int g_blit_ct;   // the open copy encoder has the compute argument table set (dispatches share it, dispatch_enc)
-static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
+static id<MTL4ComputeCommandEncoder> blit_open(void) { if (!g_blit) { tf_en_close(); ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:blit_vis()]; gp_begin(g_blit, 'C', nil); g_bw_n = g_br_n = 0; g_blit_ops = 0; g_blit_ct = 0; } return g_blit; }
 static void ubd_flush(void); static int g_nubd;   // the inline updates deferred (see mtl_sub_update)
 static int g_ubd_landing;
 static id<MTL4ComputeCommandEncoder> blit_raw(void) {
@@ -1567,7 +1572,7 @@ uint64_t mtl_sub_commit(void) {
     res_commit();
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
-    [g_cb endCommandBuffer];
+    tf_en_close(); [g_cb endCommandBuffer];
     rec_commit(g_cb, o);
     rec_signal(g_ev, fence);
     rec_drain();
@@ -1904,12 +1909,13 @@ static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
 static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
 // DM_RES_SCALE=<f> (1 to 4, default 1 = off): the textures the GPU draws are made f times wider and taller, so a game drawing 1920x1080 draws 3840x2160 at 2 (Ryujinx's resolution
 // scaling). The game keeps its own sizes: passes into a scaled texture scale their viewport and scissor (g_pass.rs), the present its crop, and translated shaders read
-// render_scale[0] (encode_args) to give gl_FragCoord back in the game's pixels. Scaled: 2D, 2D array and multisample textures of at least 64x64 that the CPU never fills
+// render_scale[0] (encode_args) to give gl_FragCoord back in the game's pixels. Scaled: 2D, 2D array and multisample textures of at least 64x64 (wide: the profile's res_scale_min_width) that the CPU never fills
 // (not packaged, not linear, sparse or a shader-written image). shortcut: buffer↔texture copies and CPU readbacks of a scaled texture are not scaled (a red line says so); add them
 // when a game needs one
 static float rs_factor(void) { static float f; if (!f) { const char *e = getenv("DM_RES_SCALE"); float v = e ? (float)atof(e) : 1; f = v >= 1 && v <= 4 ? v : 1; } return f; }
 static int rs_fits(const tex_t *t, int packaged) {
-    if (rs_factor() == 1 || packaged || fmt_compressed(t->d.format) || t->d.width < 64 || t->d.height < 64 || MAX(t->d.width, t->d.height) * rs_factor() > 16384) return 0;
+    static int minw = -1; if (minw < 0) { const char *e = getenv("DM_RES_SCALE_MIN_WIDTH"); minw = e ? atoi(e) : DM_GAME_RES_SCALE_MIN_WIDTH; }   // profile res_scale_min_width
+    if (rs_factor() == 1 || packaged || fmt_compressed(t->d.format) || t->d.width < (unsigned)minw || t->d.height < 64 || MAX(t->d.width, t->d.height) * rs_factor() > 16384) return 0;
     if (t->d.flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) return 0;
     return t->d.target == 1 || t->d.target == 4 || t->d.target == 5 || t->d.target == 6 || t->d.target == 7;
 }
@@ -2827,6 +2833,8 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         pthread_mutex_lock(&g_smu); hm_put_id(&g_alias, &ak, twin); CFSetAddValue(g_alias_set, (__bridge const void *)twin); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
         tex_put(t->serial, twin); return twin;
     }
+    if (rs_factor() != 1 && t->d.width >= 1280 && t->d.height >= 720 && !rs_fits(t, 0)) { static int n; if (n++ < 40)   // which screen-sized textures stay at the game's size, and why (DM_RES_SCALE)
+        MLOG("[res-scale] not scaled: ser=%llu %ux%u format %#x target %d flags %#x samples %d", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.target, t->d.flags, t->d.samples); }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
@@ -3342,7 +3350,7 @@ static void rt_mirror_flush(void) {
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
-static void rp_end(void) { if (g_enc) { AP_B;
+static void rp_end(void) { tf_en_close(); if (g_enc) { AP_B;
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
 #ifdef NVN_RT_RANGE_TEST
@@ -7191,6 +7199,25 @@ static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support
 #define RS_SUPPORT_LEN 1536
 // The scale of texture slot i of the shader's numbering (encode_args): negative for a pixel shader reading a scaled texture of the target's proportions, as Ryujinx does, so a texel
 // fetch at the game's coordinates picks the scaled texel under the pixel (gl_FragCoord mod scale) instead of the same one for every pixel of the block
+// Pixel shaders whose math only takes ratios of the game's sizes (DM_RES_SCALE_NATIVE, keys): they get their real pixel position and read every texture in its own texels, so
+// they work at the scaled size itself. Tears of the Kingdom's FSR 1 upscale (ac58fc18eda5f387) reads 12 neighbours of a texel by fixed offsets; with the position halved and
+// doubled back, the offsets landed inside one game texel and the 3200x1792 scene came out as a blocky 1600x896 one
+// Each rule: <key>[:c<reg>@<byte>,<byte>...], rules separated by ';'. The listed 32-bit whole numbers of that uniform buffer (sizes in the game's pixels, such as the FSR
+// output size) are multiplied by the pass's scale in a copy the shader reads instead
+typedef struct { char key[17]; int reg, n; uint16_t off[8]; uint8_t fl[8]; } rs_nat_rule;   // fl: the value is a float (written f<byte>), else a 32-bit whole number
+static const rs_nat_rule *rs_native(const char *key) {
+    static rs_nat_rule rules[16]; static int nr; static char raw[1024]; static uint64_t at = ~0ull; uint64_t f = atomic_load(&g_cur_frame);
+    if (f != at) { at = f; const char *e = getenv("DM_RES_SCALE_NATIVE"); if (!e) e = DM_GAME_RES_SCALE_NATIVE;   // read once a frame: DM_CTL's env can change it mid-run
+        if (strcmp(raw, e)) { snprintf(raw, sizeof raw, "%s", e); nr = 0; char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", e);
+            for (char *save = NULL, *r = strtok_r(tmp, ";", &save); r && nr < 16; r = strtok_r(NULL, ";", &save)) {
+                rs_nat_rule *x = &rules[nr]; memset(x, 0, sizeof *x); x->reg = -1; char *c = strchr(r, ':'); if (c) *c++ = 0;
+                snprintf(x->key, sizeof x->key, "%s", r);
+                if (c && c[0] == 'c') { x->reg = atoi(c + 1); char *at_ = strchr(c, '@'); for (char *o = at_ ? at_ + 1 : NULL; o && *o && x->n < 8;) { x->fl[x->n] = *o == 'f'; x->off[x->n++] = (uint16_t)atoi(o + (*o == 'f')); o = strchr(o, ','); if (o) o++; } }
+                if (x->key[0]) nr++; } } }
+    if (!key || !key[0]) return NULL;
+    for (int i = 0; i < nr; i++) if (!strncmp(key, rules[i].key, strlen(rules[i].key))) return &rules[i];
+    return NULL;
+}
 static void rs_note(float rsv[73], int *any, int i, id<MTLTexture> t, int nvn_stage) {
     float f = t ? rs_of(t) : 1; if (f == 1 || i >= 73) return;
     if (nvn_stage == 1 && g_pass.rs == f && (uint64_t)g_pass.tw * t.height == (uint64_t)g_pass.th * t.width) f = -f;
@@ -7370,7 +7397,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     uint32_t bmask = 0; float bk[DMSH_BORDER_SAMPLERS][4];   // the border colour block (see nvn_border.h): the twins that correct, their factors
     // DM_RES_SCALE: render_scale[1 + n] is the scale of the shader's n-th texture (its texture members in argument order, buffer textures and single uniform-buffer handles counted),
     // then its images; the translator multiplies texel fetch coordinates and divides size queries by it. Measured on Pokémon Scarlet's 00090c49af8c1d09: slot 7 = its 8th texture
-    float rsv[73]; int rs_on = rs_factor() != 1, rs_any = 0, rs_ti = 0, rs_ii = 0, rs_nt = 0, sup_aid = -1;
+    const rs_nat_rule *rs_nat = rs_factor() != 1 && nvn_stage == 1 && g_pass.rs != 1 ? rs_native(sh->key) : NULL;   // a pixel shader that runs in the scaled pixels as they are (rs_native)
+    float rsv[73]; int rs_on = rs_factor() != 1 && !rs_nat, rs_any = 0, rs_ti = 0, rs_ii = 0, rs_nt = 0, sup_aid = -1;
     if (rs_on) { for (int i = 0; i < 73; i++) rsv[i] = 1;
         for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind; rs_nt += k == NVN_RB_TEX || k == NVN_RB_TBUF || (k == NVN_RB_TEXU && !sh->rf.b[i].n); } }
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
@@ -7399,6 +7427,12 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                     FILE *f = fopen(p, "wb"); if (f) { fwrite((const void *)u->addr, 1, u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP cannot write %s", p);
                 }
             }
+            if (rs_nat && rs_nat->reg == reg && rs_nat->n) {   // its sizes in the scaled pixels (rs_native): a copy with the listed whole numbers multiplied
+                id<MTLBuffer> ab; size_t o = arena_alloc((size_t)ul, &ab); uint8_t *d = (uint8_t *)ab.contents + o;
+                if (g_nubd && ubd_covers(u->addr, u->addr + ul)) ubd_read(u->addr, (size_t)ul, d); else memcpy(d, (const void *)(uintptr_t)u->addr, (size_t)ul);   // shortcut: the CPU's view of the rest; fine for blocks the CPU writes
+                for (int k = 0; k < rs_nat->n; k++) if (rs_nat->off[k] + 4u <= ul) { uint8_t *p = d + rs_nat->off[k];
+                    if (rs_nat->fl[k]) { float v; memcpy(&v, p, 4); v *= g_pass.rs; memcpy(p, &v, 4); } else { uint32_t v; memcpy(&v, p, 4); v = (uint32_t)(v * g_pass.rs + 0.5f); memcpy(p, &v, 4); } }
+                slots[aid] = ab.gpuAddress + o; USE(ab, MTLResourceUsageRead); continue; }
             slots[aid] = gpu;
             USE((__bridge id<MTLBuffer>)mb, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_SAMPU && b->n) {   // the samplers of an array of handles in a uniform buffer: element k = the sampler ID of the handle at byte 8k (see the textures below)
@@ -7612,7 +7646,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         else RED_ONCE(46, "binding kind %d not implemented", b->kind);
     }
     if (sup_aid >= 0) {   // the shared block (all scales 1), or this draw's own: render_scale[0] = the pass's scale for a pixel shader (gl_FragCoord), [1..] the textures'
-        int reg = 0, rt = nvn_stage == 1 && g_pass.rs > 1;
+        int reg = 0, rt = nvn_stage == 1 && g_pass.rs != 1 && !rs_nat;
         if (!rs_any && !rt) { slots[sup_aid] = support_gpu(); USE(support_buf(), MTLResourceUsageRead); }
         else { id<MTLBuffer> db; size_t doff = arena_alloc(RS_SUPPORT_LEN, &db); uint8_t *d = (uint8_t *)db.contents + doff;
             memcpy(d, support_buf().contents, RS_SUPPORT_LEN);
@@ -9509,7 +9543,7 @@ static void mdi_wait(void) {
     rp_end(); ubd_land();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     up_flush(); res_commit();
-    [g_cb endCommandBuffer];
+    tf_en_close(); [g_cb endCommandBuffer];
     rec_commit(g_cb, nil);
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
@@ -10486,11 +10520,11 @@ static void mirror_rb_land(void *p) {   // the submission's completion handler
     mrb_note(m->t.serial, -1);
     free(m);
 }
+static int fmt_int_or_ds(MTLPixelFormat f); static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror);
 static void copy_b2t(const p_copy_b2t *c) {
     if (c->tex) zskip_del(c->tex->serial);
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
-    if (rs_of(t) != 1) RED_ONCE(144, "buffer-to-texture copy into a scaled texture (DM_RES_SCALE, ser=%llu %ux%u): written at the game's size, into its top-left part", (unsigned long long)c->tex->serial, c->tex->d.width, c->tex->d.height);
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
     unsigned level = c->has_view && c->view.set_levels ? c->view.base_level : 0, layer0 = c->has_view && c->view.set_layers ? c->view.min_layer : 0;
     if (!tex_level_ok(t, level, "buffer-to-texture copy")) return;
@@ -10516,6 +10550,23 @@ static void copy_b2t(const p_copy_b2t *c) {
         size_t wb = (size_t)((c->r.width + bw - 1) / bw) * bpb; id<MTLBuffer> ab; size_t ao = arena_alloc(wb * rows * nz, &ab);
         if (rb_swap_gpu(sb.gpuAddress + mo, row, img, ab.gpuAddress + ao, wb, wb * rows, wb, rows, nz, shift)) { sb = ab; mo = ao; row = wb; img = wb * rows; }
         else RED_ONCE(7, "RGB565-family buffer→texture copy left in the guest's order: red and blue exchanged");
+    }
+    float rsf = is3d ? 1 : rs_of(t);
+    if (rsf != 1) {   // a scaled texture (DM_RES_SCALE): the bytes go into an image at the game's size, which is drawn scaled into the region (TotK's cutscene movie frames)
+        if (!(t.usage & MTLTextureUsageRenderTarget) && !fmt_int_or_ds(t.pixelFormat)) t = tex_upgrade(c->tex, t, MTLTextureUsageRenderTarget, t.pixelFormat);
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:c->r.width height:c->r.height mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> tmp = t ? [g_dev newTextureWithDescriptor:td] : nil; int ok = tmp != nil;
+        if (tmp) { res_add(tmp);
+            NVNcopyRegion sr = {0, 0, 0, c->r.width, c->r.height, 1};
+            for (int z = 0; z < nz && ok; z++) {
+                enc_b_copy_buffer_texture(blit(), sb, mo + z * img, row, img, MTLSizeMake(c->r.width, c->r.height, 1), tmp, 0, 0, MTLOriginMake(0, 0, 0));
+                NVNcopyRegion dr = {c->r.xoffset, c->r.yoffset, 0, c->r.width, c->r.height, 1}; rs_region(&dr, rsf);
+                ok = copy_t2t_draw(tmp, t, 0, 0, level, layer0 + c->r.zoffset + z, &sr, &dr, 1, 0); }
+            defer_obj_release(tmp); }
+        if (ok) return;
+        RED_ONCE(144, "buffer-to-texture copy into a scaled texture (DM_RES_SCALE, ser=%llu %ux%u format %lu) not drawn scaled: written at the game's size, into its top-left part",
+                 (unsigned long long)c->tex->serial, c->tex->d.width, c->tex->d.height, (unsigned long)t.pixelFormat);
     }
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
@@ -10890,7 +10941,7 @@ static void sub_cut(void) {
         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); }
     }];
     res_commit();
-    [g_cb endCommandBuffer];
+    tf_en_close(); [g_cb endCommandBuffer];
     rec_commit(g_cb, o);
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     g_cb = rec_cb_new();

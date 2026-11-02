@@ -188,6 +188,9 @@ def header(g):
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
+         f'#define DM_GAME_RES_SCALE_MIN_WIDTH {int(g.get("res_scale_min_width", "64"))}',
+         f'#define DM_GAME_RES_SCALE_FPS_TARGET {int(g.get("res_scale_fps_target", "0"))}',   # fps_target while DM_RES_SCALE is above 1 (loader.c dm_profile_fps_target); 0 = fps_target
+         f'#define DM_GAME_RES_SCALE_NATIVE "{g.get("res_scale_native", "")}"',   # pixel shaders run at the scaled size itself (nvn_mtl.m rs_native)   # narrower textures stay at the game's size under DM_RES_SCALE (nvn_mtl.m rs_fits)
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
