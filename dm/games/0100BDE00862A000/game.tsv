@@ -1,0 +1,36 @@
+# Game profile of Mario Tennis Aces (Switch, update 3.1.0 = v786432). Boots on the Mac through the opening movie, Adventure, the main menu and a Free Play singles match (README.md)
+# Format: see dm/games/README.md
+# Camelot's engine on SDK 4.5.0, NVN; subsdk0 is the SDK's movie library (VP9 WebM movies, decoded by the host). Files in Nitro archives (.narc), opened by shader_split.py
+
+# ---- Identity ----
+title_id	0100BDE00862A000
+program_id	0100BDE00862A000
+
+# ---- App ----
+name	Mario Tennis Aces
+ipa	MarioTennisAces.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	3.1.0	main=32487e7e3d94954e6eb824abe489b2fc	subsdk0=303578054faefc2198114b62e408c498	sdk=e01ad5381c948c4ec3b0bb210b08d5c8
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	movie/oplay.webm
+zip_store	.bfsar:.bfsha:.narc:.nptl:.webm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/model/=model /texture/=texture /snd/=snd /layout/=layout /effect/=effect /entrance/=entrance /audience/=audience /npc/=npc /gimmickparam/=gimmickparam /msg/=msg /movie/=movie /ssg_system/=ssgsystem /shader/=shader /json/=json /font/=font /ssg_develop/=ssgdevelop /gimmickmap/=gimmickmap
+shader_note	Mario Tennis Aces shaders
