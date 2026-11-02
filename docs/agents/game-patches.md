@@ -92,6 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Brilliant Diamond](#pokémon-brilliant-diamond) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Pokémon Scarlet](#pokémon-scarlet) | 3 | 0 | 0 | 0 | 0 | `build` |
 | [Subnautica](#subnautica) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Subnautica: Below Zero](#subnautica-below-zero) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Mario Party Jamboree](#super-mario-party-jamboree) | 1 | 0 | 0 | 0 | 0 | `build` |
@@ -453,6 +454,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **1.3.0 `main`** `94ceae32…`
   - host [hle_fpslock.c:27](../../dm/host/hle_fpslock.c#L27): engine frame limit set to fps_target: Unity targetFrameRate
 
+### Pokémon Scarlet
+
+[Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md), `0100A3D008C5C000`, [patches.py](../../dm/games/0100A3D008C5C000/patches.py).
+
+- **`build`**, runtime, at goal, checked: the three original instructions of 4.0.0 are the guards in the catalog; the third is the verify-callback choice, as in Super Mario Party Jamboree 2.3.0: gRPC's root certificate loading and server certificate check relaxed. Online play on Nextendo; Nextendo's catalog publishes it per build, so a new game build gets its own entry there
+
+- **4.0.0 `main`** `421c5411…` ([patches.py:9](../../dm/games/0100A3D008C5C000/patches.py#L9))
+  - cut `+0x1fe4b4`: root certificate loading: cbnz w0, main+0x1fe588 → nop (an entry that fails to load is skipped)
+  - cut `+0x1fe558`: root certificate loading: b.ne main+0x1fe5a4 → nop (the count check)
+  - cut `+0x1feea0`: gRPC server certificate check: ldrb w10, [x21, #0x38] → mov w10, #1 (skip it; Nextendo signs its own)
+
 ### Subnautica
 
 [Subnautica](../../dm/games/0100429011144000/README.md), `0100429011144000`, [patches.py](../../dm/games/0100429011144000/patches.py).
@@ -637,7 +649,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `pso_mtl4 on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
 | `res_scale_fps_target 30` | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game`, at goal | a game with dynamic resolution measures its frame against the target; what it can hold at 2x depends on the game |
 | `res_scale_min_width 1600` | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game` → `host`, gap | effects that sample at spacings set for the game's resolution break when their images are scaled; the host could find those images itself |
-| `res_scale_native ac58fc18eda5f387:c0@64,68` | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game` → `host`, gap | which shaders take only ratios apart from a few sizes in their uniforms is read from each shader; the host could recognise FSR-style upscales itself |
+| `res_scale_native ac58fc18eda5f387:c0@64,68;a8faa4a42321dfb1:c0@f16,f20;6f97107c4bf7b304:c0@f16,f20;2c853627088359da:c0@f16,f20;4d0c1056fefdb98a:c0@f16,f20;2324b0681d307ebe:c0@f16,f20` | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | `game` → `host`, gap | which shaders take only ratios apart from a few sizes in their uniforms is read from each shader; the host could recognise FSR-style upscales itself |
 | `shader_key_skip 0x770+0x78` | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |
 | `shader_key_skip 0x7d0+0x18` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |
 | `stdalloc_cap 0xa0000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | what the regions after it need, measured by the NSP script's region check; the host's cap is the default |

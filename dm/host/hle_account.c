@@ -68,8 +68,19 @@ HLE_FORCE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAc
           void *info, const UserHandle *h, void *buf, uint64_t sz) { if (dmo_signed_in()) return dmo_na_info(info); (void)info; (void)h; (void)buf; (void)sz; return RES_FAIL; }
 
 // AsyncContext / NintendoAccountAuthorizationRequestContext: object contents are read and written only by the interfaces below; construction writes no memory, the completion event fires immediately, and the result is always failure
-HLE_FORCE("_ZN2nn7account12AsyncContextC1Ev", "async context constructor; the host creates no IPC object", void, h_acc_AcCtor, void *self) { (void)self; }
+// The constructor writes what the SDK's does (Pokémon Scarlet's sdk+0x4838): the vtable, and no IPC object (+0x18 null, which the SDK's destructor then skips).
+// Scarlet allocates one itself and deletes it through the vtable (main+0x26889c4); left unwritten, that read heap garbage as the vtable and crashed
+HLE_FORCE("_ZN2nn7account12AsyncContextC1Ev", "async context constructor; the host creates no IPC object", void, h_acc_AcCtor, void *self) {
+    static uint8_t *vt; if (!vt) vt = guest_sym("_ZTVN2nn7account12AsyncContextE");
+    if (vt && self) { void **o = self; o[0] = vt + 0x10; o[1] = o[2] = o[3] = NULL; }
+}
 HLE_FORCE("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", "network service account token, out of scope; cut", Result, h_acc_EnsureTokAsync, void *ctx, const UserHandle *h) { if (dmo_signed_in()) return RES_OK; (void)ctx; (void)h; return RES_FAIL; }
+// The Nintendo Switch Online membership check (Pokémon Scarlet, as it goes online): left to the SDK it called through the IPC object it expects inside the user handle,
+// which the host's handle does not hold, and crashed (sdk+0xa354). Signed in to Nextendo, a membership (kind 1, Common), as Ryujinx answers; the context's base calls report done
+HLE_FORCE("_ZN2nn7account34LoadNetworkServiceLicenseInfoAsyncEPNS0_37AsyncNetworkServiceLicenseInfoContextERKNS0_10UserHandleE", "online membership check, out of scope; signed in to Nextendo, done", Result, h_acc_LicenseAsync,
+          void *ctx, const UserHandle *h) { (void)ctx; (void)h; return dmo_signed_in() ? RES_OK : RES_FAIL; }
+HLE_FORCE("_ZN2nn7account37AsyncNetworkServiceLicenseInfoContext28GetNetworkServiceLicenseKindEv", "online membership kind: none; signed in to Nextendo, Common", int, h_acc_LicenseKind,
+          void *self) { (void)self; return dmo_signed_in() ? 1 : 0; }
 HLE_FORCE("_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", "async completion event; fires immediately", Result, h_acc_AcGetEv, void *self, void *ev) { (void)self; hle_signal_system_event(ev); return RES_OK; }
 HLE_FORCE("_ZN2nn7account12AsyncContext9GetResultEv", "async result; networking is cut, always fails", Result, h_acc_AcGetRes, void *self) { if (dmo_signed_in()) return RES_OK; (void)self; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContextC1Ev", "Nintendo Account authorization, out of scope; the constructor writes no memory", void, h_acc_NaCtor, void *self) { (void)self; }

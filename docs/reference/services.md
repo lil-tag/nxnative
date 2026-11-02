@@ -596,6 +596,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** with `DM_NEXTENDO=1` (`hle_net.c`, `hle_online.c`, `hle_online_ssl.c`): `HandleNetworkRequestResult` succeeds (offline it fails, as before); the older socket forms go to the same online calls as their newer siblings, and lookups have nothing to cancel (they finish before they return). TLS trusts Nextendo's addresses and any address no internet name lookup produced, which is where Nextendo's replies send a game; an address an internet name resolved to is still refused, since Nextendo's certificates are accepted unchecked.
 - **Found on:** Mario Tennis Aces 3.1.0, online on Nextendo.
 
+### Online membership check
+
+- **Symptom:** Pokémon Scarlet crashed as it went online, right after the Nextendo sign-in: `CRASH sig=11` at `sdk+0xa354`, with the host's user handle marker ("USERHNDL") as the address.
+- **Cause:** `account::LoadNetworkServiceLicenseInfoAsync` (the Nintendo Switch Online membership check) was not taken over; the SDK's own code read the IPC object it expects inside the user handle and called through it.
+- **Fix:** signed in to Nextendo (`hle_account.c`), the check succeeds and `AsyncNetworkServiceLicenseInfoContext::GetNetworkServiceLicenseKind` answers 1 (Common, a membership), as Ryujinx does; the context's own constructor and move stay the SDK's (they only set the base context the host already answers). Scarlet's SDK 13 reaches errno through `__nnmusl_ErrnoLocation` (the PLT behind `__errno_location`), which `dm_guest_errno` now reads first. Its npln TLS needs Nextendo's catalog patch for 4.0.0 (`pokemon-scarlet-npln-421c5411`, in the profile's `patches.py`), as Jamboree's does.
+- **Found on:** Pokémon Scarlet 4.0.0, online on Nextendo.
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.

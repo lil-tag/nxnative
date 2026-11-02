@@ -20,9 +20,10 @@ static void t_free(void *p) { if (!p) return; atomic_fetch_sub(&g_live_blocks, 1
 
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 uint64_t dm_gate_top[1024]; const uint8_t dm_gate_stubs[16 * 1024];   // entry.S's gate tables (guest_gate_stack, which this test does not call)
-// dm_guest_errno: the SDK's __errno_location as Super Mario Party Jamboree has it, an exported b to `mrs x8, tpidrro_el0; add x0, x8, #0x1d8; ret`
-static const uint32_t g_errno_code[5] = {0x14000002, 0, 0xd53bd068, 0x91076100, 0xd65f03c0};
-void *guest_sym(const char *name) { return !strcmp(name, "__errno_location") ? (void *)g_errno_code : NULL; }
+// dm_guest_errno: the SDK's errno body as the rewriter leaves it, its mrs a b into the patch area: `b <gate>; add x0, x8, #0x1d8; ret`. Pokémon Scarlet names it
+// __nnmusl_ErrnoLocation itself (the b must not be followed); Super Mario Party Jamboree's __errno_location is a b to such a body
+static const uint32_t g_errno_code[5] = {0x14000002, 0, 0x14100000, 0x91076100, 0xd65f03c0};
+void *guest_sym(const char *name) { return !strcmp(name, "__nnmusl_ErrnoLocation") ? (void *)(g_errno_code + 2) : !strcmp(name, "__errno_location") ? (void *)g_errno_code : NULL; }
 static void *errno_thread(void *a) { (void)a; guest_thread_init(); return (int *)((uint8_t *)pthread_getspecific(g_keytlr) + 0x1d8) == dm_guest_errno() ? (void *)1 : NULL; }
 
 static int fails, checks;
