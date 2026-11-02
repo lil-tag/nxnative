@@ -85,7 +85,7 @@ typedef struct {
     int job; const uint8_t *jp; int jn, jslot, jgot; int64_t jpts, jpts_out; int jflush;
     mavc *avc; int avc_drain; int64_t drain_pts; // H.264 (hle_movie_avc.c); avc_drain: the end-of-stream packet's output had a picture; the pictures still queued leave one per free slot, then an empty output with the
                                                  // end-of-stream flag and the packet's time (drain_pts)
-    vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
+    vpx_codec_ctx_t vpx; int vpx_on, vpx_key, red_dec, red_img;   // vpx_key: a key frame went in since the decoder was made
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
@@ -261,6 +261,14 @@ void md_rgba(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     }
     #undef CL
 }
+// 1 when the packet is a key frame: VP8's frame tag bit 0 is 0; VP9's uncompressed header has frame_marker 2, the profile bits (one more, reserved, at profile 3),
+// show_existing_frame 0 and frame_type 0. A superframe starts with its first frame's header
+static int vpx_is_key(int vp8, const uint8_t *p, int n) {
+    if (n < 1) return 0;
+    if (vp8) return !(p[0] & 1);
+    int b = p[0], profile = (b >> 5 & 1) | (b >> 3 & 2), s = profile == 3 ? 2 : 3;   // s: show_existing_frame's bit, frame_type the next
+    return b >> 6 == 2 && !(b >> s & 1) && !(b >> (s - 1) & 1);
+}
 // decode one packet into output slot slot: 1 = a picture came out, 0 = none (hidden frame or error)
 static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
     const char *codec = d->type == MD_TYPE_VP8 ? "VP8" : "VP9";
@@ -270,9 +278,11 @@ static int md_vpx(mdec_t *d, const uint8_t *p, int n, int slot) {
         vpx_codec_err_t e = vpx_codec_dec_init(&d->vpx, iface, &cfg, 0);
         if (e) { LOG("[RED] movie: libvpx failed to create the %s decoder: %s", codec, vpx_codec_err_to_string(e)); return 0; }
         if (d->type == MD_TYPE_VP9) vpx_codec_control(&d->vpx, VP9D_SET_ROW_MT, 1);
-        d->vpx_on = 1;
+        d->vpx_on = 1; d->vpx_key = 0;
         LOG("[movie] libvpx %s: %s decoder, %d threads", vpx_codec_version_str(), codec, cfg.threads);
     }
+    // A packet the game sends after Stop or a flush goes to a new decoder and may need frames it never saw (Mario Tennis Aces skipping its opening): dropped until a key frame
+    if (!d->vpx_key && !(d->vpx_key = vpx_is_key(d->type == MD_TYPE_VP8, p, n))) { LOG("[movie] %s packet of %d bytes before any key frame: dropped", codec, n); return 0; }
     if (vpx_codec_decode(&d->vpx, p, (unsigned)n, NULL, 0)) {
         if (!d->red_dec++) LOG("[RED] movie: %s decode error (first case, %d bytes): %s %s", codec, n, vpx_codec_error(&d->vpx), vpx_codec_error_detail(&d->vpx) ? vpx_codec_error_detail(&d->vpx) : "");
         return 0;

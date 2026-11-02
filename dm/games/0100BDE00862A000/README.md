@@ -22,8 +22,7 @@ On the Mac (2026-11-01, built from the NSPs with `nxplay --build-only`): the ope
 
 ## Open
 
-- **122 shadow shaders fail to compile**: they write the viewport mask, which the translation does not carry. Only the shadow cascades use them. Fixing it changes the shader chain, so every game's shaders would rebuild.
-- **A tessellated draw with a geometry shader is skipped** in matches (vertex `a35ef1d624ddee49`, geometry `01405a80a24425e8`, tessellation 1). Its red line prints on every draw (17,974 lines in a 13-minute run) instead of once.
-- One VP9 decode error per run in the opening movie (523 bytes); the movie still plays.
+- **Lava is not drawn** (Adventure's island map; most likely the Bowser's Castle court too): its program has tessellation stages and a geometry shader (vertex `a35ef1d624ddee49`, geometry `01405a80a24425e8`, `/shader/lava/lava.bnsh`), and the Mac layer draws neither tessellation ([Tessellation stages are not drawn](../../../docs/reference/shaders.md#tessellation-stages-are-not-drawn)) nor this combination. The draw is skipped with a red line (the first 8 times).
+- **122 shader variants do not compile**: vertex shaders of `/ssg_system/shadowmap/out/shadowmap.bfsha` (and others) that write the viewport mask (`gl_BuiltIn_5253`), which Metal has no output for. The game asked for none of them in the menus, Adventure's first scenes, or matches on grass and clay (it would print `[RED] shader … failed to load`); the players' shadows draw. Supporting them changes the shader chain.
 - Distant crowd flicker was reported on 3.1.1; not checked here.
-- No smoke route yet (`smoke.tsv`).
+- Frame rate not measured with the Mac idle. No smoke route yet (`smoke.tsv`).

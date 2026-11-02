@@ -39,6 +39,14 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** both C2 forms (with and without a priority) are taken over like their C1 forms (`hle_movie.c`); for a class without virtual bases they do the same.
 - **Found on:** Mario Tennis Aces 3.1.0 (SDK 4.5.0).
 
+### A VP9 packet sent after Stop reaches a new decoder
+
+- **Symptom:** `[RED] movie: VP9 decode error (first case, 523 bytes): Unspecified internal error` once, right after the player skips a movie.
+- **Cause:** the game stops the movie and sends one more packet, an inter frame. The host's decoder was made again after the stop, so the frames it refers to are gone.
+- **Fix:** each libvpx decoder drops the packets before its first key frame with a plain `[movie]` line (`hle_movie.c`, `vpx_is_key`: VP8's frame tag, VP9's uncompressed header).
+- **Check:** `t_movie_vpx` (`make -C dm/host/tests GAME=<id> run`).
+- **Found on:** Mario Tennis Aces 3.1.0, skipping its opening movie.
+
 ### SDK 3's `movie::Decoder` constructor takes a type and a format only
 
 - **Symptom:** a call through a null pointer in the host's `movie::Decoder::Configure` (`pc=0 lr=h_movie_Configure+…`) when the first movie starts; with only the constructor taken over, `[RED] movie: decoder type 1 output 3 mode 1 not supported by the host`.

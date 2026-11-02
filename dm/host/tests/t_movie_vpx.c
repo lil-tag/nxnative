@@ -101,4 +101,11 @@ int main(void) {
         decode(2, format, vp8, sizeof vp8);
     }
     puts("VP8 and VP9 key frames: NV12 and RGBA pixels match");
+    assert(vpx_is_key(0, vp9, sizeof vp9) && vpx_is_key(1, vp8, sizeof vp8));
+    static const uint8_t vp9_inter[] = {0x86, 0x00}, vp8_inter[] = {0xf1, 0x02};
+    assert(!vpx_is_key(0, vp9_inter, 2) && !vpx_is_key(1, vp8_inter, 2) && !vpx_is_key(0, vp9, 0));
+    mdec_t d = { .type = 3, .fmt = MD_FMT_NV12, .w = 16, .h = 16 };
+    assert(md_vpx(&d, vp9_inter, 2, 0) == 0 && !d.red_dec && !d.vpx_key);   // dropped quietly, no red line
+    assert(md_vpx(&d, vp9, sizeof vp9, 0) == 1 && d.vpx_key);
+    puts("a packet before any key frame is dropped without a decode error");
 }
