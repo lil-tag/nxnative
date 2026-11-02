@@ -7,6 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
+#ifdef DM_GAME_FPS_TARGET   // test profiles without frame-rate keys leave it out
+// The profile's fps_target, or its res_scale_fps_target while the Resolution setting (DM_RES_SCALE) is above 1x: Tears of the Kingdom at 2x runs at about 30 fps, and with
+// a 60 fps target its dynamic resolution halved the scene (800x448) to try to keep up
+#include <stdlib.h>
+static inline int dm_profile_fps_target(void) { const char *r = getenv("DM_RES_SCALE"); return DM_GAME_RES_SCALE_FPS_TARGET && r && atof(r) > 1 ? DM_GAME_RES_SCALE_FPS_TARGET : DM_GAME_FPS_TARGET; }
+#endif
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
 // can otherwise wait forever for a peer that needs the signaller's native lock. Uncontended locks retain guest ordering; the counter nests inside existing host work.
