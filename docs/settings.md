@@ -65,6 +65,10 @@ Shows the frames per second at the top left.
 
 A light tap from the phone when you press an on-screen button.
 
+### Play in the background (Mac)
+
+On: when you switch to another app, the game keeps running at full speed and your controller keeps playing it. The keyboard and mouse go to the app in front, as usual. Off (the default): the game is told it lost focus, and it ignores the controller until you click its window again. A game behind another window can still show fewer frames, because macOS slows the screen updates of a covered window. In an `env.txt`: `DM_BACKGROUND_PLAY=1`.
+
 ### Game rumble
 
 The game's vibration, on the phone or on a connected controller.
@@ -229,6 +233,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Play in the background (Mac) | `DM_BACKGROUND_PLAY` | `1`, `0` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |

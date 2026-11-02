@@ -54,6 +54,8 @@ A built app carries the settings its game supports, as the iPhone app's settings
 
 A Mac app shows its own settings window before the game, drawn from its `launcher.json` and keeping its choices in the same store ([Saved choices](#saved-choices), [The Mac settings window](settings.md#the-mac-settings-window)). It shows a variable the launch environment or an `env.txt` sets as fixed. A front end that draws the settings itself starts the app with `DM_LAUNCHER=0` in its environment (or `--no-launcher` on its command line) to skip the window. The saved choices still apply, so a front end that writes them gets the same game as the window would.
 
+A Mac game that loses focus is told so (focus state 2) and stops taking input; with `DM_BACKGROUND_PLAY=1` (the setting Play in the background) it keeps running and its controllers keep playing while another app is in front, and only the keyboard and mouse follow the key window. A front end that wants this sets the variable, not its own focus handling.
+
 Settings a player chose in a front end and wants kept, also for a start from Finder or the Dock, go in the app's saved choices ([Saved choices](#saved-choices)), not in its environment.
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.

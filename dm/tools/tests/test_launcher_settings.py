@@ -64,7 +64,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_RES_SCALE'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Resolution, which a phone's GPU cannot afford at 2×
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_RES_SCALE', 'DM_BACKGROUND_PLAY'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Resolution, which a phone's GPU cannot afford at 2×; play behind another app (an iPhone app in the background is suspended)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
