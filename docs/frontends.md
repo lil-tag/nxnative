@@ -6,6 +6,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
 - [Online play](#online-play)
+- [An app that hosts the engine](#an-app-that-hosts-the-engine)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
 ## Building: the NSP script
@@ -55,6 +56,8 @@ A built app carries the settings its game supports, as the iPhone app's settings
 A Mac app shows its own settings window before the game, drawn from its `launcher.json` and keeping its choices in the same store ([Saved choices](#saved-choices), [The Mac settings window](settings.md#the-mac-settings-window)). It shows a variable the launch environment or an `env.txt` sets as fixed. A front end that draws the settings itself starts the app with `DM_LAUNCHER=0` in its environment (or `--no-launcher` on its command line) to skip the window. The saved choices still apply, so a front end that writes them gets the same game as the window would.
 
 A Mac game that loses focus is told so (focus state 2) and stops taking input; with `DM_BACKGROUND_PLAY=1` (the setting Play in the background) it keeps running and its controllers keep playing while another app is in front, and only the keyboard and mouse follow the key window. A front end that wants this sets the variable, not its own focus handling.
+
+A Mac game quits when the player holds a controller's Home button for 2 seconds and confirms with A ([On the Mac](playing.md#on-the-mac)). Its prompt is in English; a front end that shows the player another language passes the texts in `DM_HOME_QUIT_TEXT`, one per line in this order: the hold indicator ("Keep holding to quit"), the title ("Quit <game>?"), the note ("Unsaved progress will be lost."), the quit button and the cancel button. An empty or missing line keeps the English text. Whether macOS lets the game have the Home button is the player's Home button setting for apps, which a front end reads itself on macOS 27 (`GCControllerHomeButtonSettingsManager`, while a controller is connected) to tell the player when the system keeps Home.
 
 Settings a player chose in a front end and wants kept, also for a start from Finder or the Dock, go in the app's saved choices ([Saved choices](#saved-choices)), not in its environment.
 
@@ -121,6 +124,13 @@ A Mac build plays the save in `<id>_build/run/save` (and `run/save_device` for a
 
 - **The Miis:** games that list the console's Miis (Mario Kart, Smash's Mii Fighters) get the player's Mii database, then the six default Miis, from the first of: `DM_MII_DATABASE`, `~/Library/Application Support/nxnative/MiiDatabase.dat`, Ryujinx's `bis/system/save/8000000000000030/0/MiiDatabase.dat` (`dm/host/hle_mii.c`). Without one, only the six default Miis. Making or editing Miis needs the console's Mii editor, which the host does not have.
 - **Their faces:** a game draws Mii heads from the firmware's MiiModel archive. `nx_extract <prod.keys> --sysdata <Ryujinx>/bis/system/Contents/registered 0100000000000802 ~/Library/Application Support/nxnative/sysdata/0100000000000802` takes it from the player's installed firmware, once for every game, and the NSP script does it by itself when the folder is missing and Ryujinx's firmware is installed (`mii_faces`); the host mounts any archive in that folder (`DM_SYSDATA` names another). Without it, Mii heads draw nothing.
+
+## An app that hosts the engine
+
+An app that links the host and the front end's game view into its own process (a launcher holding several games, say) has these hooks in `dm/host/front.h`. nxnative's own apps do not use them, so its tests and regression runs do not cover them. Each one is unset by default, and a hook must be set before the game starts.
+
+- **`front_progress_hook`**: draws the prepare step's progress ("Preparing shaders", "Preparing pipelines") instead of the front end's screen. With a window, it gets each call's title, done and total on the main thread; the title is `NULL` when the step ends.
+- **`dm_set_game_image_header`** (iOS): names the image that carries the game's rewritten modules, when the app links them into a framework it `dlopen`s from its signed bundle instead of into its executable. Call it with that image's mach header before `dm_host_preload_start`. Only the module sections are read from it.
 
 ## What a front end cannot see yet
 
