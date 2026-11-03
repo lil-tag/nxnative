@@ -898,7 +898,9 @@ static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
     size = (size + 7) & ~7u;
     for (int tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
-        if (!o->cb || tries == 2) {
+        // A record over half the memory the game last added means the game sized it for the device's smaller commands, where it would not run out: lend, do not call back.
+        // Smash uploads each news picture through a 256-byte command buffer whose callback calls a null handler (main+0x31be0); the host's copy record takes 216 of them
+        if (!o->cb || tries == 2 || (o->cmd_size && size + keep > o->cmd_size / 2)) {
             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size + keep);
             size_t sz = hostseg_size(o, 0, size + keep); cmd_new_segment(o, hostseg_take(o, sz), sz); break;
         }

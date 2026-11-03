@@ -601,6 +601,22 @@ int main(void) {
         EXPECT("the cap counts every segment's bytes", sum, g_hostseg_bytes);
         P(nvnCommandBufferFinalize)(&c4); P(nvnCommandBufferFinalize)(&c5); P(nvnMemoryPoolFinalize)(&dp);
     }
+    // 5b'''. As Smash uploads a news picture: 256 bytes of command memory and a callback that must not run (its handler is null); a record over half of them gets a host segment
+    {
+        NVNcommandBuffer c6; P(nvnCommandBufferInitialize)(&c6, &dev);
+        int calls0 = g_cb_calls; P(nvnCommandBufferSetMemoryCallback)(&c6, mem_cb);
+        P(nvnCommandBufferAddCommandMemory)(&c6, &g_cmdpool, (ptrdiff_t)g_cmdoff, 256); g_cmdoff += 256;
+        static uint8_t ubuf[4096] __attribute__((aligned(4096))), d6[160]; memset(d6, 0x4C, sizeof d6);
+        NVNmemoryPoolBuilder ub6; NVNmemoryPool up6; P(nvnMemoryPoolBuilderSetDefaults)(&ub6); P(nvnMemoryPoolBuilderSetStorage)(&ub6, ubuf, sizeof ubuf); P(nvnMemoryPoolInitialize)(&up6, &ub6);
+        P(nvnCommandBufferBeginRecording)(&c6);
+        P(nvnCommandBufferUpdateUniformBuffer)(&c6, (uintptr_t)ubuf, sizeof ubuf, 1024, 4, d6);   // a small record first (Smash: a barrier; a later test counts barriers)
+        P(nvnCommandBufferUpdateUniformBuffer)(&c6, (uintptr_t)ubuf, sizeof ubuf, 0, sizeof d6, d6);
+        NVNcommandHandle h6 = P(nvnCommandBufferEndRecording)(&c6);
+        EXPECT("a record over half of a 256-byte grant: no callback", calls0, g_cb_calls);
+        P(nvnQueueSubmitCommands)(&q, 1, &h6); P(nvnQueueFinish)(&q);
+        EXPECT("the lent record replays", 0, memcmp(ubuf, d6, sizeof d6));
+        P(nvnCommandBufferFinalize)(&c6); P(nvnMemoryPoolFinalize)(&up6);
+    }
 
     // 5b. Sync must hold the CPU back: first queue 24 copies of 64 MiB to keep the GPU busy, with the last one copying src to dst;
     //     the CPU rewrites src only after the fence wait returns. If the wait is released early, that last copy reads the rewritten src.

@@ -65,10 +65,18 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_symbols
 	$(B)/t_online
 	$(B)/t_online_tls
+	$(B)/t_bcat
+	$(B)/t_web
 run: $(B)/t_nro
 run: $(B)/t_symbols
 run: $(B)/t_online
 run: $(B)/t_online_tls
+run: $(B)/t_bcat
+run: $(B)/t_web
+$(B)/t_web: t_web.c ../hle_web.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_web.c
+$(B)/t_bcat: t_bcat.c ../hle_bcat.c ../online.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_bcat.c -lcompression
 $(B)/t_online_tls: t_online_tls.c ../hle_online.c ../hle_online_ssl.c ../hle_online_account.c ../online.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-unused-result -I.. $(GINC) -o $@ t_online_tls.c -framework Security -framework CoreFoundation
 $(B)/t_online: t_online.c ../hle_online.c ../online.h ../hle.h ../dm.h $(GAME_H) | $(B)
