@@ -83,7 +83,34 @@ static void sparse_copies(void) {
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&sparse); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&physical); mtl_pool_del(io);
     defer_drain(); munmap(mem, len); munmap(io, len);
 }
+// Textures in sparse pools share memory only when their pages do: an address range alone cannot tell, and "may alias" for all of them split Mario Tennis Fever's passes
+static void sparse_overlap(void) {
+    const size_t pg = getpagesize(), len = 4 * pg;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    pool_t physical, sparse;
+    pool_builder_t pb = {.mem=mem, .size=len, .flags=0x24};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&physical, (const NVNmemoryPoolBuilder *)&pb), "physical pool initialized");
+    pb = (pool_builder_t){.size=DM_GAME_APP_POOL + 2 * len, .flags=0x200};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&sparse, (const NVNmemoryPoolBuilder *)&pb), "sparse pool initialized");
+    map_req maps[] = {{.phys=(NVNmemoryPool *)&physical, .size=pg}, {.phys=(NVNmemoryPool *)&physical, .poff=pg, .voff=pg, .size=pg}, {.phys=(NVNmemoryPool *)&physical, .voff=2 * pg, .size=pg}};
+    CHECK(h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&sparse, 3, (const NVNmappingRequest *)maps), "three pages mapped");
+    uint64_t v = (uint64_t)sparse.mem, m = (uint64_t)mem;
+    CHECK(nvn_sparse_alias(v, v + pg) && nvn_sparse_alias(v + pg, v + 2 * pg), "both ranges may alias by address");
+    CHECK(!nvn_mem_overlap(v, pg, v + pg, pg), "pages over different memory do not overlap");
+    CHECK(nvn_mem_overlap(v, pg, v + 2 * pg, pg), "two pages over the same memory overlap");
+    CHECK(nvn_mem_overlap(v, pg, m, pg), "a page and the plain memory behind it overlap");
+    CHECK(!nvn_mem_overlap(v + pg, pg, m, pg), "a page and other plain memory do not");
+    CHECK(!nvn_mem_overlap(v, pg, v + 3 * pg, pg), "an unmapped page overlaps nothing");
+    CHECK(!nvn_mem_overlap(m, pg, m + pg, pg), "plain ranges side by side do not overlap");
+    tex_t a = {.serial=99701, .mem=(uint8_t *)v}, b = {.serial=99702, .mem=(uint8_t *)(v + 2 * pg)}; a.L.size = b.L.size = pg;
+    CHECK(tex_storage_overlap(&a, &b), "textures over the same memory overlap");
+    map_req again = {.phys=(NVNmemoryPool *)&physical, .poff=3 * pg, .voff=2 * pg, .size=pg};
+    CHECK(h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)&sparse, 1, (const NVNmappingRequest *)&again), "the second texture's page mapped elsewhere");
+    CHECK(!tex_storage_overlap(&a, &b), "a new mapping is seen past the kept answer");
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&sparse); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&physical);
+    munmap(mem, len);
+}
 int main(void) { @autoreleasepool {
-    mtl_init(); separate_buffers(); sparse_copies();
+    mtl_init(); separate_buffers(); sparse_copies(); sparse_overlap();
     printf("t_copy_alias: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

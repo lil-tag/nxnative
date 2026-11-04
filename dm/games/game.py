@@ -155,6 +155,12 @@ def header(g):
     sko, skl = (int(m[1], 0), int(m[2], 0)) if m else (0, 0)
     rcd = g.get('render_cond', 'off')   # NVN conditional rendering evaluated at replay, timestamp reports with counter 0 (nvn_mtl.m OP_RENDER_COND): on / off
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond must be on or off: {rcd}')
+    iwl = g.get('image_write_late', 'off')   # a render target flagged as an image gets the shader-write usage when a shader first writes it, which keeps its lossless compression until then
+    if iwl not in ('on', 'off'): sys.exit(f'{g.id}: image_write_late must be on or off: {iwl}')
+    ffp = g.get('fb_fresh_pass', 'off')   # a same-pass feedback snapshot is not reused by another fragment shader after SetRenderTargets, even with no barrier between
+    if ffp not in ('on', 'off'): sys.exit(f'{g.id}: fb_fresh_pass must be on or off: {ffp}')
+    clh = g.get('cmd_lend_half', 'off')   # a command record over half the memory the game last added takes a host segment without calling the game's memory callback
+    if clh not in ('on', 'off'): sys.exit(f'{g.id}: cmd_lend_half must be on or off: {clh}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload must be on or off: {tfu}')
     tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
@@ -221,6 +227,9 @@ def header(g):
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_RES_SCALE_MIN_WIDTH {int(g.get("res_scale_min_width", "64"))}',
+         f'#define DM_GAME_CMD_LEND_HALF {1 if clh == "on" else 0}',
+         f'#define DM_GAME_FB_FRESH_PASS {1 if ffp == "on" else 0}',
+         f'#define DM_GAME_IMAGE_WRITE_LATE {1 if iwl == "on" else 0}',
          f'#define DM_GAME_RES_SCALE_FPS_TARGET {int(g.get("res_scale_fps_target", "0"))}',   # fps_target while DM_RES_SCALE is above 1 (loader.c dm_profile_fps_target); 0 = fps_target
          f'#define DM_GAME_RES_SCALE_NATIVE "{g.get("res_scale_native", "")}"',   # pixel shaders run at the scaled size itself (nvn_mtl.m rs_native)   # narrower textures stay at the game's size under DM_RES_SCALE (nvn_mtl.m rs_fits)
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',

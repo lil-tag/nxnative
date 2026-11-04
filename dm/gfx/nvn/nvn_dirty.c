@@ -181,6 +181,11 @@ int nvn_dirty_tracked(const void *addr, size_t len) {
 }
 // The tracked range holding [addr, addr+len), as a handle a caller keeps (packaged textures: the scan over every range ran twice per texture lookup). NULL = untracked
 const void *nvn_dirty_span(const void *addr, size_t len) { return len ? find_span((uintptr_t)addr, len) : NULL; }
+// A pool's buffer becomes GPU-resident now: its pages are writable until nvn_dirty_unhold, and nothing protects any page meanwhile. Made resident with a page read-only, the GPU's mapping of the pool stays so
+// whatever the page does afterwards, and the GPU's writes there stop the whole GPU ("BIF0 page fault", every frame, until macOS stops taking the game's work). Pools are 4 KB aligned and host pages 16 KB, so a
+// neighbour's protected texture can reach into a new pool: Mario Tennis Fever's menus, about one run in three. A texture on such a page counts as written and is uploaded again, once
+void nvn_dirty_hold_writable(void *addr, size_t len) { pthread_mutex_lock(&g_slot_mu); prep_write(addr, len); }
+void nvn_dirty_unhold(void) { pthread_mutex_unlock(&g_slot_mu); }
 // Set read-only: mark the pages BUSY first and mark them PROT only after mprotect has landed (for the order and the invariant see the state notes at the top of the file)
 void nvn_dirty_protect(const void *addr, size_t len) {
     // Keep this descriptor live through the last mprotect. Retirement restores

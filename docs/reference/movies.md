@@ -292,6 +292,13 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md): 101 guide movies (`Movie/*.webm`, VP9 960×540, no sound); its player reads the pictures as NV12 (`ReadDecoderOutputImageNv12`, output format 3).
 - **Open:** AV1 (no decoder on the host: Initialize fails with a red line, so a client takes its error path instead of reaching the service), encrypted input, native image handles (the GPU route of decoded pictures), alias pools and the readback of part of a picture are not served (each prints a red line once). No game here plays VP8 or H.264 through this API yet: those paths are checked by the test only. Donkey Kong Bananza's player imports all four decoders; its movies are VP9.
 
+### A Switch 2 VP9 movie in slow motion
+
+- **Symptom:** a movie plays slower than real time while the performance HUD shows 60 fps, and the sound may fall out of step. It's worst while something else is using the CPU. The game keeps drawing at full speed: only the decoder is behind.
+- **Cause:** `hle_codec_video.c` opened libvpx with 2 threads and no row multithreading, where `hle_movie.c` uses `md_threads()` and `VP9D_SET_ROW_MT`. [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s title movie is 2560x1440 at 60 fps, 24.5 Mbit/s. On an M4 with a shader build running, the first 900 frames of it decoded at 37 to 39 fps that way, against a movie's 60.
+- **Fix:** the same thread count and row multithreading as `hle_movie.c`. Those frames then decode at 278 fps with 4 threads, under the same load.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md) (M4, 24 GB).
+
 ### The submission-ready event counted as packets
 
 - **Symptom:** a movie stays black with the game waiting behind it, the decoder made and no `first picture` line (`Submit…InputBuffer` never called). Or `[RED] nn::codec VP9: Corrupt frame detected`, then `Keyframe / intra-only frame required`, each time about 6 s into a movie or after skipping in one.

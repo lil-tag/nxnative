@@ -369,6 +369,9 @@ check_t_missing_src1: RUN_ENV = MTL_DEBUG_LAYER=1
 t_primitive_restart: t_primitive_restart.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_primitive_restart.m $(MTL_T_SRC) $(FW)
 check_t_primitive_restart: RUN_ENV = MTL_DEBUG_LAYER=1
+t_lazy_clear: t_lazy_clear.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_lazy_clear.m $(MTL_T_SRC) $(FW)
+check_t_lazy_clear: RUN_ENV = MTL_DEBUG_LAYER=1
 t_depth16_clear: t_depth16_clear.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_depth16_clear.m $(MTL_T_SRC) $(FW)
 check_t_depth16_clear: RUN_ENV = MTL_DEBUG_LAYER=1

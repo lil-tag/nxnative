@@ -447,6 +447,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): terrain tiles (260x260 R16 height, RG8 with 9 levels, RGBA8, R11G11B10F, and 68x68 RGBA16) in a `CPU_CACHED | GPU_CACHED` pool (flags 0x24), 50 to 90% of their bytes non-zero at first use and all zero on Metal, so every tile was a flat plane at its base height. Pull request #1109 found this on update 1.8.0.
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_cpu_storage`.
 
+### A command list called after its lent segment went back to the pool
+
+- **Symptom:** intermittent, and only with the profile key below on: memory grows about 5 GB a second with the frames stopped, then `FATAL no memory for the deferred operations`, a backtrace of `mtl_sub_counter` or `mtl_sub_event` under `mtl_exec`; or a crash in `sdx_walk` or `post_complete`.
+- **Cause:** `cmd_lend_half` lends a host segment for a record over half the memory the game last added, without calling its memory callback. It is there for Smash, whose callback crashes. On [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), whose recordings start in 256-byte blocks with a working callback, every recording took a segment. A segment goes back to the pool when the game gives out the guest bytes it hangs off, so another thread recorded over a list still being called. A stale handle then pointed into the middle of a record, and data read as a record of size 0 never advanced the replay.
+- **Fix:** `cmd_lend_half` is a profile key, on for Smash only. The replay also drops the rest of a list at a record it cannot have written (size under 8 or an unknown op), with a red line, instead of running memory out.
+- **Check:** 4 full matches with no lent segment and no red line, from a save that had one or both in most runs before.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), on this fork's merge of upstream; upstream has no such rule.
+
 ### CPU writes with no flush, caught by page protection (`tex_dirty_upload`)
 
 - **Symptom:** magenta surfaces (Metal decodes an all-zero ASTC block as the error colour (1, 0, 1)); a zero BC block decodes black, which looks like missing light; black screen while the UI (or a dialog box) draws in the right places under `HILITE` or in the pass dump; `packaged textures: first uploads 0`.

@@ -42,6 +42,37 @@ static int production_clears(id<MTLTexture> attachment, id<MTLTexture> texture, 
     return failed;
 }
 
+// A scaled copy of a Depth16 texture is drawn (Mario Tennis Fever's town shadow map, 2048x2048 → 1024x1024, was dropped with a red line). The left half 0.25, the right half 0.75 must stay so at half the size
+static int scaled_copy(id<MTLDevice> dev, id<MTLCommandQueue> q) {
+    enum { SW = 8, DW = 4 };
+    uint16_t src[SW * SW], dst[DW * DW] = {0};
+    for (int i = 0; i < SW * SW; i++) src[i] = i % SW < SW / 2 ? 16384 : 49151;
+    id<MTLTexture> tex[2]; tex_t t[2] = {0};
+    for (int k = 0; k < 2; k++) {
+        int w = k ? DW : SW;
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth16Unorm width:w height:w mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate; tex[k] = [dev newTextureWithDescriptor:td];
+        t[k].magic = MAGIC('T','E','X',0); t[k].serial = 99601 + k;
+        t[k].d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_DEPTH16, .width=w, .height=w, .depth=1, .levels=1, .samples=1};
+        res_add(tex[k]); mtl_tex_init(&t[k]); serial_put(t[k].serial, tex[k]);
+    }
+    id<MTLBuffer> up = [dev newBufferWithBytes:src length:sizeof src options:MTLResourceStorageModeShared], down = [dev newBufferWithLength:sizeof dst options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+    [b copyFromBuffer:up sourceOffset:0 sourceBytesPerRow:SW * 2 sourceBytesPerImage:sizeof src sourceSize:MTLSizeMake(SW, SW, 1) toTexture:tex[0] destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    struct { op_hdr h; p_copy_t2t c; op_hdr end; } ops = {.h = {OP_COPY_T2T, sizeof(op_hdr) + sizeof(p_copy_t2t)}, .c = {.src=&t[0], .dst=&t[1], .sr={0, 0, 0, SW, SW, 1}, .dr={0, 0, 0, DW, DW, 1}}, .end = {OP_END, sizeof(op_hdr)}};
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec((const uint8_t *)&ops); mtl_sub_commit(); mtl_drain();
+    cb = [q commandBuffer]; b = [cb blitCommandEncoder];
+    [b copyFromTexture:tex[1] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(DW, DW, 1) toBuffer:down destinationOffset:0 destinationBytesPerRow:DW * 2 destinationBytesPerImage:sizeof dst];
+    [b endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    memcpy(dst, down.contents, sizeof dst);
+    int bad = mtl_last_commit_error() != 0;
+    for (int i = 0; i < DW * DW; i++) { int want = i % DW < DW / 2 ? 16384 : 49151; bad += abs((int)dst[i] - want) > 1; }
+    printf("t_depth16_clear: scaled copy %dx%d to %dx%d: %d wrong (first row %u %u %u %u)\n", SW, SW, DW, DW, bad, dst[0], dst[1], dst[2], dst[3]);
+    for (int k = 0; k < 2; k++) mtl_tex_release(&t[k]);
+    return bad;
+}
+
 int main(void) { @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     if (!dev) { puts("t_depth16_clear: no Metal device, skipped"); return 0; }
@@ -110,5 +141,6 @@ int main(void) { @autoreleasepool {
     }
     printf("t_depth16_clear: %d depths, ClearDepthStencil differs from the fragment in %d, ClearTexture in %d, raw clear in %d (0.5: fragment %u, raw clear %u)\n",
            N, fail[0], fail[1], raw_off, v[(size_t)1000 * W * H], v[((size_t)2 * N + 1000) * W * H]);
-    return fail[0] != 0 || fail[1] != 0;
+    int scaled = scaled_copy(dev, q);
+    return fail[0] != 0 || fail[1] != 0 || scaled != 0;
 } }

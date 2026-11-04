@@ -200,6 +200,17 @@ static void reuse_case(NvProg *pr) {
     clear(MTLClearColorMake(0, 0, 1, 1));
     fb_prepare(pr);
     CHECK(g_fb_n == 1 && !g_enc && g_fb_count == copies + 2, "a game barrier makes the next writing draw take a fresh snapshot");
+#if DM_GAME_FB_FRESH_PASS
+    // Profile key fb_fresh_pass: with no barrier between, another shader keeps the snapshot until the targets are set again; the shader that took it (a light draw) keeps it past that too
+    { NvShader *other = [NvShader new]; other->rf = fs->rf; strlcpy(other->key, "other", sizeof other->key);
+      pr->sh[1] = other; fb_prepare(pr);
+      CHECK(g_fb_count == copies + 2, "another shader with the same targets reuses the snapshot");
+      pr->sh[1] = fs; g_fb_rtn++; fb_prepare(pr);
+      CHECK(g_fb_count == copies + 2, "the same shader after SetRenderTargets reuses the snapshot");
+      pr->sh[1] = other; fb_prepare(pr);
+      CHECK(g_fb_count == copies + 3, "another shader after SetRenderTargets takes a fresh snapshot");
+      pr->sh[1] = fs; g_fb_bar++; copies = g_fb_count - 2; }
+#endif
     rp_end();
     // The depth attachment read, then written in the same pass (only serials matter to the rule: the attachment is named after the pass opens)
     { tex_t output, depth; target(&output, 99791); target(&depth, 99792); mtl_reg_tex(651, &depth, NULL);   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): g_by_serial owns both textures (serial_put's CFBridgingRetain) until mtl_tex_release below, not a leak
@@ -412,6 +423,7 @@ static void shape_case(void) {
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
 int main(int argc, char **argv) { @autoreleasepool {
+    setenv("DM_NVN_IMAGE_LATE", "0", 1);   // the image cases need the shader-write usage from the start, whatever the game profile says
     setenv("DM_NVN_TBDR", "0", 1);
     mtl_init(); NSError *error = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"

@@ -549,7 +549,8 @@ static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / t
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
 static void pool_res(int i) {
     if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+    nvn_dirty_hold_writable((void *)g_pools[i].base, g_pools[i].buf.length); res_add(g_pools[i].buf); res_commit(); nvn_dirty_unhold();   // see nvn_dirty_hold_writable
+    g_pools[i].res = 1; g_pool_res_n++;
 }
 // A large pool in chunks. Metal wires a zero-copy buffer whole while it is in the residency set, so one buffer over a large pool pins all of it, whatever the GPU reads. Mario Kart World's 2,427 MB
 // graphics pool: the GPU has touched 1,111 MB by the first race, 326 MB of it in the last 1,500 frames; on a 16 GB Mac the driver then spent half its time wiring and unwiring (3.2 s of a 6 s Metal System
@@ -1826,7 +1827,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[157];
+static int g_red_once[158];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2174,8 +2175,11 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
         }
     }
     d.storageMode = MTLStorageModePrivate;   // Render targets and assets both go in GPU private storage (lossless compression available)
+    // Profile key image_write_late (DM_NVN_IMAGE_LATE overrides): a render target the game flags as an image gets the shader-write usage only when a shader first writes it (image_prepare upgrades it), not when it is made:
+    // that usage costs Apple's lossless compression. Mario Tennis Fever flags its render targets so and writes 9 of them: in a match on an M4 the GPU time went from 17.9 to 14.4 ms a frame, and the game from about 53 fps to 60
+    static int img_late = -1; if (img_late < 0) { const char *e = getenv("DM_NVN_IMAGE_LATE"); img_late = e ? atoi(e) != 0 : DM_GAME_IMAGE_WRITE_LATE; }
     d.usage = MTLTextureUsageShaderRead | (fmt_compressed(t->d.format) || packaged ? 0 : MTLTextureUsageRenderTarget)
-            | img_usage(t, d.pixelFormat);   // Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.
+            | (img_late && !fmt_compressed(t->d.format) && !packaged ? 0 : img_usage(t, d.pixelFormat));   // Image usage: shader-writable (compute kernels generating the 3D color lookup table, etc.
     // A depth-stencil texture has the format-view usage from the start: its stencil is read through an X32_Stencil8 view (stencil-mode views and textures, the depth-stencil copy), which Metal's
     // contract allows only with that usage. Apple GPUs read the view correctly without it, but the API validation layer aborts the process at the first such view (PR #106, found on Luigi's
     // Mansion 3), and upgrading later would recreate a depth buffer in use. Unlike colour formats it costs nothing measured: on an M4 Pro a 2560x1440 one has the same allocated size and the same
@@ -8917,13 +8921,24 @@ static int rt_range_same(const p_set_rt *a, const p_set_rt *b) {
         depth.textureType == MTLTextureType2D && color.sampleCount == 1 && depth.sampleCount == 1 &&
         g_pass.reg_gen == g_reg_gen && g_pass.ser_gen == g_ser_gen && g_pass.range_dirty == nvn_dirty_now();
 }
+int nvn_mem_overlap(uint64_t a, uint64_t an, uint64_t b, uint64_t bn); int nvn_mem_interval(uint64_t a, uint64_t n, uint64_t *lo, uint64_t *hi); uint64_t nvn_sparse_gen(void);   // hle_nvn.c
 static int tex_storage_overlap(const tex_t *a, const tex_t *b) {
     if (!a || !b) return 0;
     if (a->serial == b->serial) return 1;
     if (!a->mem || !b->mem) return 0;
     uint64_t x = (uint64_t)a->mem, y = (uint64_t)b->mem;
     if (!a->L.size || !b->L.size || a->L.size > UINT64_MAX - x || b->L.size > UINT64_MAX - y) return 1;
-    return (x < y + b->L.size && y < x + a->L.size) || nvn_sparse_alias(x, x + a->L.size) || nvn_sparse_alias(y, y + b->L.size);
+    if (x < y + b->L.size && y < x + a->L.size) return 1;
+    static int page_walk = -1; if (page_walk < 0) page_walk = sw_mode("DM_NVN_SPARSE_OVERLAP", 1);
+    if (!sw_on(page_walk)) return nvn_sparse_alias(x, x + a->L.size) || nvn_sparse_alias(y, y + b->L.size);
+    // Each texture's memory as one interval, kept per texture until a mapping changes: asked for every texture of every draw against every attachment (submit thread; about 30% of its time when it walked pages per pair)
+    enum { TI = 1 << 13 }; static struct { uint64_t serial, gen, lo, hi; int one; } ti[TI];
+    uint64_t gen = nvn_sparse_gen(); const tex_t *tx[2] = {a, b}; __typeof__(&ti[0]) e[2];
+    for (int k = 0; k < 2; k++) { e[k] = &ti[(tx[k]->serial * 0x9E3779B97F4A7C15ull) >> 51];
+        if (e[k]->serial != tx[k]->serial || e[k]->gen != gen) { e[k]->serial = tx[k]->serial; e[k]->gen = gen; e[k]->one = nvn_mem_interval((uint64_t)tx[k]->mem, tx[k]->L.size, &e[k]->lo, &e[k]->hi); } }
+    if (e[0] == e[1]) return nvn_mem_overlap(x, a->L.size, y, b->L.size);   // two textures in one slot: no kept answer for both
+    if (e[0]->one && e[1]->one) return e[0]->lo < e[1]->hi && e[1]->lo < e[0]->hi;
+    return nvn_mem_overlap(x, a->L.size, y, b->L.size);
 }
 static int g_samples_fb_left;   // draw_samples_rt: a fragment texture that is a colour attachment does not count: fb_prepare answers for it, as for any draw of a pass
 static int draw_samples_rt(NvProg *pr) {   // Sampled attachments keep the original conservative ser-level guard, not split by level/layer
@@ -9993,7 +10008,8 @@ void ms_after(void) {
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless)
-typedef struct { uint64_t ser, bar, sub, use; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use)
+typedef struct { uint64_t ser, bar, sub, use, rtn; const void *fs; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use); fs, rtn: the fragment shader that took it, the targets it was taken under (fb_live)
+static uint64_t g_fb_rtn; static const void *g_fb_fs;   // SetRenderTargets calls so far; the fragment shader of the draw being prepared
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
 static int fb_mode(void) {
     if (g_fb_mode < 0) { const char *e = getenv("DM_NVN_FB_SNAP"); g_fb_mode = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "all") ? 2 : 1;
@@ -10002,7 +10018,10 @@ static int fb_mode(void) {
 }
 static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = 0; } }
 static inline int fb_shape(const fb_cache_t *e, MTLPixelFormat pf, NSUInteger w, NSUInteger h) { return e->snap && e->snap.pixelFormat == pf && e->snap.width == w && e->snap.height == h; }
-static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb_bar && e->sub == g_sub_serial; }   // a later draw may still reuse it
+// A later draw may still reuse it. Profile key fb_fresh_pass: not another fragment shader after the game set its targets again, even with no barrier between. Mario Tennis Fever's Adventure maps draw their lights
+// (each samples target 115, a copy taken before the first) and then, with no barrier, set the same targets and draw the atmosphere, which samples 115 for the lit scene: the old copy put the unlit scene back,
+// a dark world with a black sky. Its stadiums have a barrier there. On for this game only so far: Breath of the Wild's decals reuse one copy across targets and shaders, and it costs a pass and a copy each time
+static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb_bar && e->sub == g_sub_serial && !(DM_GAME_FB_FRESH_PASS && e->rtn != g_fb_rtn && e->fs != g_fb_fs); }
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on).
 // A new key takes an entry whose texture already has its format and size, one no later draw can reuse first, else the least recently used. Taking the entries in turn made a texture for
 // nearly every snapshot when a frame snapshots several sizes: Tears of the Kingdom's 4-5 a frame (1600x896 down to 400x224) each made one, 4-6 GB of textures every 300 frames on the Mac
@@ -10021,7 +10040,7 @@ static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUI
     if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
         e->snap = [g_dev newTextureWithDescriptor:d]; if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
-    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; *fresh = 1; return e;
+    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->rtn = g_fb_rtn; e->fs = g_fb_fs; e->use = ++g_fbc_use; *fresh = 1; return e;
 }
 // ---- Same-pass feedback read from the tile ----
 // A draw whose every sample of an attachment of its open pass is a projective sample at its vertex shader's clip → screen varying (scr_proof), or a sample at its pixel position times
@@ -10115,7 +10134,7 @@ static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_mode()) return;
-    NvShader *fs = pr->sh[1];
+    NvShader *fs = pr->sh[1]; g_fb_fs = fs->key;
     fb_pass_sync();
     uint32_t wm = 0;   // the attachments this draw writes
     for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k] && ((S.chmask.mask >> (4 * k)) & 0xf) && (fs->rf.color_known ? fs->rf.color_mask >> k & 1 : 1)) wm |= 1u << k;
@@ -10529,12 +10548,14 @@ static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 // Lazy clears. A set of targets that gets only clears before the game sets other targets used to open a pass just to land them (rp_flush), storing the cleared attachments, and the next
 // pass that attached them loaded them back. Breath of the Wild clears its G-buffer one target at a time (depth with the lighting target, then albedo, normals, the fourth), then attaches all
 // five: four passes stored 27 MB of cleared memory at 1600x900 and the G-buffer pass loaded it again. Such clears now wait (g_lc): the next pass that attaches the same texture level and
-// layer through the same view takes the clear as its load action. The rest land as before, in order, each in a pass of its own (lc_land), before anything else could see their textures: a
-// draw whose program samples one, the pass of a draw that does not attach it (before that pass opens), and any operation other than targets, clears, state, uniform updates and buffer
-// copies or fills, and the end of a command list (not of a sub-list it calls). A newer clear of the same subresource replaces an older one. Off in TBDR mode (its hoisting moves clear-only passes its own way).
+// layer through the same view takes the clear as its load action. The rest wait on, and land in order, each in a pass of its own (lc_land), before anything else could see their textures: a
+// draw whose program samples one (in an open pass too), a pass that attaches its texture some other way, and any operation other than targets, clears, state, uniform updates and buffer
+// copies or fills, and the end of a command list (not of a sub-list it calls). A ClearTexture of a whole colour level waits the same way (lc_tex). Mario Tennis Fever clears the 16 to 33 crowd pictures of a
+// frame first (each a colour target, a normal target and depth) and then draws them: each clear used to land, up to 66 passes a frame that draw nothing, about 3.6 ms on an M4. A newer clear of the same
+// subresource replaces an older one. Off in TBDR mode (its hoisting moves clear-only passes its own way).
 // DM_NVN_LAZY_CLEAR=0 turns it off
-typedef struct { p_set_rt rt; uint8_t clear_c[8]; MTLClearColor cc[8]; uint8_t clear_d, clear_s; double cd; uint32_t cs; } lc_group;
-enum { LC_MAX = 8 };
+typedef struct { p_set_rt rt; uint8_t clear_c[8]; MTLClearColor cc[8]; uint8_t clear_d, clear_s, any_view; double cd; uint32_t cs; } lc_group;   // any_view: from a ClearTexture, whose view need not be the target's
+enum { LC_MAX = 128 };
 static lc_group g_lc[LC_MAX]; static int g_nlc;
 static uint64_t g_lc_taken, g_lc_landed;   // clears a later pass took as its load action / clear-only passes still opened for them (the residency set line)
 void mtl_lc_stats(uint64_t *taken, uint64_t *landed) { *taken = g_lc_taken; *landed = g_lc_landed; }
@@ -10544,6 +10565,10 @@ static int lc_same(const p_set_rt *a, int ka, const p_set_rt *b, int kb) {   // 
     if (!s1 || s1 != s2 || l1 != l2 || x1 != x2) return 0;
     int h1 = ka == 8 ? a->has_dview : a->has_cview[ka], h2 = kb == 8 ? b->has_dview : b->has_cview[kb];
     return h1 == h2 && (!h1 || !memcmp(ka == 8 ? &a->dview : &a->cview[ka], kb == 8 ? &b->dview : &b->cview[kb], sizeof(view_t)));
+}
+static int lc_same_sub(const p_set_rt *a, int ka, const p_set_rt *b, int kb) {   // the same subresource, b's view reading it in the texture's own format (a's is that already: lc_tex)
+    uint64_t s1, s2; int l1, l2, x1, x2; rt_sub(a, ka, &s1, &l1, &x1); rt_sub(b, kb, &s2, &l2, &x2);
+    return s1 && s1 == s2 && l1 == l2 && x1 == x2 && !(b->has_cview[kb] && b->cview[kb].set_format && b->cview[kb].format != b->color[kb]->d.format);
 }
 // Land every waiting clear, oldest first, each group in a pass of its own (rp_flush's way)
 static void lc_land(void) {
@@ -10558,18 +10583,37 @@ static void lc_land(void) {
         rp_begin_ex(1); rp_end(); g_lc_landed++; }
     R = save;
 }
-// SetRenderTargets with clears pending and no draw since: the clears wait instead of opening a pass
-static void lc_push(void) {
-    if (g_nlc == LC_MAX) lc_land();
-    lc_group *g = &g_lc[g_nlc];
-    g->rt = R.rt; memcpy(g->clear_c, R.clear_c, sizeof g->clear_c); memcpy(g->cc, R.cc, sizeof g->cc); g->clear_d = R.clear_d; g->clear_s = R.clear_s; g->cd = R.cd; g->cs = R.cs;
-    for (int gi = 0; gi < g_nlc; gi++) { lc_group *o = &g_lc[gi];   // older clears of the same subresources are overwritten
+static void lc_supersede(const lc_group *g) {   // older clears of the same subresources are overwritten
+    for (int gi = 0; gi < g_nlc; gi++) { lc_group *o = &g_lc[gi];
         for (int i = 0; i < 8; i++) if (o->clear_c[i]) for (int j = 0; j < 8; j++) if (g->clear_c[j]) { uint64_t s1, s2; int l1, l2, x1, x2; rt_sub(&o->rt, i, &s1, &l1, &x1); rt_sub(&g->rt, j, &s2, &l2, &x2);
             if (s1 && s1 == s2 && l1 == l2 && x1 == x2) { o->clear_c[i] = 0; break; } }
         if ((o->clear_d || o->clear_s) && (g->clear_d || g->clear_s)) { uint64_t s1, s2; int l1, l2, x1, x2; rt_sub(&o->rt, 8, &s1, &l1, &x1); rt_sub(&g->rt, 8, &s2, &l2, &x2);
             if (s1 && s1 == s2 && l1 == l2 && x1 == x2) { if (g->clear_d) o->clear_d = 0; if (g->clear_s) o->clear_s = 0; } } }
-    g_nlc++;
+}
+// SetRenderTargets with clears pending and no draw since: the clears wait instead of opening a pass
+static void lc_push(void) {
+    if (g_nlc == LC_MAX) lc_land();
+    lc_group *g = &g_lc[g_nlc];
+    g->rt = R.rt; memcpy(g->clear_c, R.clear_c, sizeof g->clear_c); memcpy(g->cc, R.cc, sizeof g->cc); g->clear_d = R.clear_d; g->clear_s = R.clear_s; g->cd = R.cd; g->cs = R.cs; g->any_view = 0;
+    lc_supersede(g); g_nlc++;
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
+}
+// A ClearTexture of a whole colour level waits as a clear of that one target; 0 when it cannot (a part of the level, some channels, an integer clear, a view of another format, several layers,
+// a texture no pass could attach yet, or a clear already pending on it in the targets being set, which would then count as the newer one)
+static int fmt_int_or_ds(MTLPixelFormat f);
+static int lc_tex(const p_clear_tex *c) {
+    if (!lc_on() || !g_cb || !c->tex || c->is_uint || (c->has_view && c->view.set_format && c->view.format != c->tex->d.format) || (c->r.depth && c->r.depth != 1) || c->r.zoffset || c->r.xoffset || c->r.yoffset) return 0;
+    id<MTLTexture> t = tex_mtl(c->tex); if (!t || rs_of(t) != 1 || !(t.usage & MTLTextureUsageRenderTarget) || t.sampleCount != 1 || t.textureType == MTLTextureType3D || mtl_fmt_depth(t.pixelFormat) || fmt_int_or_ds(t.pixelFormat) || mtl_fmt_block(t.pixelFormat)) return 0;
+    unsigned lv = c->has_view && c->view.set_levels ? c->view.base_level : 0;
+    if ((NSUInteger)c->r.width != MAX(t.width >> lv, 1u) || (NSUInteger)c->r.height != MAX(t.height >> lv, 1u) || (c->mask & mtl_pf_chmask(t.pixelFormat)) != mtl_pf_chmask(t.pixelFormat)) return 0;
+    for (int i = 0; i < R.rt.n && i < 8; i++) if (R.clear_c[i] && R.rt.color[i] && R.rt.color[i]->serial == c->tex->serial) return 0;
+    if (g_nlc == LC_MAX) lc_land();
+    rp_end(); zskip_del(c->tex->serial);   // what the open pass draws comes before this clear, as it does when the clear lands at once
+    lc_group *g = &g_lc[g_nlc]; memset(g, 0, sizeof *g);
+    g->rt.n = 1; g->rt.color[0] = c->tex; if (c->has_view) { g->rt.cview[0] = c->view; g->rt.has_cview[0] = 1; }
+    g->clear_c[0] = 1; g->cc[0] = MTLClearColorMake(c->c.f[0], c->c.f[1], c->c.f[2], c->c.f[3]); g->any_view = 1;
+    lc_supersede(g); g_nlc++;
+    return 1;
 }
 // Whether the program samples a texture with a waiting clear (a program with bindless or dynamic handles counts as sampling)
 static int lc_sampled(NvProg *pr) {
@@ -10580,8 +10624,17 @@ static int lc_sampled(NvProg *pr) {
             if (b->kind == NVN_RB_IMG) h = b->reg < 32 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = tex_slot_h(S.tex[sh->stage], S.img[sh->stage], b->reg); else continue;
             uint64_t ser = h ? h_ser(h) : 0; if (!ser) continue;
             for (int gi = 0; gi < g_nlc; gi++) { const lc_group *g = &g_lc[gi];
-                for (int k = 0; k < 8; k++) if (g->clear_c[k] && g->rt.color[k] && g->rt.color[k]->serial == ser) return 1;
+                for (int k = 0; k < g->rt.n && k < 8; k++) if (g->clear_c[k] && g->rt.color[k] && g->rt.color[k]->serial == ser) return 1;
                 if ((g->clear_d || g->clear_s) && g->rt.depth && g->rt.depth->serial == ser) return 1; } } }
+    return 0;
+}
+// Whether a waiting clear's texture is attached to the pass about to open, after it took the clears it could: such a clear must land first, or it would land over what this pass draws
+static int lc_touch(const tex_t *a, const tex_t *b) { return a->serial == b->serial || (a->mem && b->mem && a->mem < b->mem + b->L.size && b->mem < a->mem + a->L.size); }   // by address: this runs for every waiting clear at every pass
+static int lc_attached(void) {
+    for (int gi = 0; gi < g_nlc; gi++) { const lc_group *g = &g_lc[gi];
+        for (int j = 0; j < R.rt.n + 1 && j < 9; j++) { const tex_t *a = j < R.rt.n ? R.rt.color[j] : R.rt.depth; if (!a) continue;
+            for (int k = 0; k < g->rt.n && k < 8; k++) if (g->clear_c[k] && g->rt.color[k] && lc_touch(a, g->rt.color[k])) return 1;
+            if ((g->clear_d || g->clear_s) && g->rt.depth && lc_touch(a, g->rt.depth)) return 1; } }
     return 0;
 }
 // The draw about to open a pass: its attachments take the waiting clears of the same subresources (the newest one; the pass's own pending clear is newer still), the rest land first
@@ -10589,14 +10642,17 @@ static void lc_take(NvProg *pr) {
     if (lc_sampled(pr)) { lc_land(); return; }
     for (int gi = g_nlc - 1; gi >= 0; gi--) { lc_group *g = &g_lc[gi];
         for (int i = 0; i < 8; i++) if (g->clear_c[i])
-            for (int j = 0; j < R.rt.n && j < 8; j++) if (R.rt.color[j] && !rt_dup_slot(&R.rt, j) && !nvn_fmt_bc(R.rt.color[j]->d.format) && lc_same(&g->rt, i, &R.rt, j)) {
+            for (int j = 0; j < R.rt.n && j < 8; j++) if (R.rt.color[j] && !rt_dup_slot(&R.rt, j) && !nvn_fmt_bc(R.rt.color[j]->d.format) && (g->any_view ? lc_same_sub(&g->rt, i, &R.rt, j) : lc_same(&g->rt, i, &R.rt, j))) {
                 if (!R.clear_c[j]) { R.clear_c[j] = 1; R.cc[j] = g->cc[i]; }
                 g->clear_c[i] = 0; g_lc_taken++; break; }
         if ((g->clear_d || g->clear_s) && R.rt.depth && lc_same(&g->rt, 8, &R.rt, 8)) {
             if (g->clear_d) { if (!R.clear_d) { R.clear_d = 1; R.cd = g->cd; } g->clear_d = 0; }
             if (g->clear_s) { if (!R.clear_s) { R.clear_s = 1; R.cs = g->cs; } g->clear_s = 0; }
             g_lc_taken++; } }
-    lc_land();
+    { int k = 0; for (int gi = 0; gi < g_nlc; gi++) { const lc_group *g = &g_lc[gi]; int left = g->clear_d || g->clear_s; for (int i = 0; i < 8; i++) left |= g->clear_c[i];   // those taken leave the list, in order
+        if (left) { if (k != gi) g_lc[k] = g_lc[gi]; k++; } }
+      g_nlc = k; }
+    if (lc_attached()) lc_land();
 }
 // The operations a waiting clear can wait across: they neither read nor write textures
 static int lc_keeps(uint32_t op) {
@@ -10606,7 +10662,7 @@ static int lc_keeps(uint32_t op) {
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
         case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
-        case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
+        case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: case OP_CLEAR_TEX: return 1;   // OP_CLEAR_TEX: it lands them itself when it cannot wait with them
         default: return 0;
     }
 }
@@ -10839,7 +10895,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (zskip_can_draw(pr)) {   // Zero-source skip: the output is always 0, writing 0 over 0, so this draw changes no result (see zskip_can_draw)
         g_zskip_count++; { static int once; if (!once++) MLOG("zero-source skip: first case pass %llu", g_stat_pass + 1); }
         PD("N %llu zero-source draw skipped", g_stat_pass + 1); return; }
-    if (g_nlc && !g_enc) lc_take(pr);   // waiting clears: this pass's load actions, or landed before it (see lc_take)
+    if (g_nlc) { if (!g_enc) lc_take(pr); else if (lc_sampled(pr)) lc_land(); }   // waiting clears: this pass's load actions; landed before a draw that samples one (see lc_take)
     if (ixc_wanted(dw, di) && !ixc_find(dw, di)) ixc_run(dw, di);   // indirect quads / fans / 8-bit indices: converted on the GPU before the render pass, at their own place in the replay (see ixc_run)
     uint64_t mdx = 0;   // the masked copy of the record (mdx_run); a draw it could not copy waits for the count instead
     if (mdx_on) { uint64_t ind = dw ? dw->ind : di->ind, cnt = dw ? dw->mdi_cnt : di->mdi_cnt; int i = dw ? dw->mdi_i : di->mdi_i;
@@ -11558,7 +11614,7 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
 static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
     static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
-    int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
+    int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
@@ -12156,6 +12212,8 @@ void mtl_exec(const uint8_t *p) {
     int trace = dump_all && passdump();   // Normal mode does not check the frame range per operation; the full command position is only used for the designated diagnostic frames
     for (;;) {
         op_hdr h; memcpy(&h, p, sizeof h);
+        // A record the host cannot have written: the list was overwritten. Of size 0 it never advances the replay, and its op queued deferred work on every pass, 5 GB/s until "no memory for the deferred operations"
+        if (h.size < 8 || h.op >= OP_COUNT_) { RED_ONCE(157, "replay: a record at %p with op %u size %u is not a command: this command list was overwritten, and the rest of it is dropped", (const void *)p, h.op, h.size); h.op = OP_END; }
         g_exec_cur = p;   // Scan start point of the store lookahead: the operation that ends the render pass (inclusive)
         if (p == g_defer_pend) { for (int gi = 0; gi < 4; gi++) if (g_defer_slots[gi].active && g_defer_slots[gi].p_end_op == p) g_defer_slots[gi].in_p = 0; g_defer_pend = NULL; }
         sdx_seq(p);
@@ -12214,6 +12272,7 @@ void mtl_exec(const uint8_t *p) {
                    n >= 4 ? ((const float *)((const uint8_t *)a + 16))[0] : 0.f, n >= 8 ? ((const float *)((const uint8_t *)a + 16))[1] : 0.f, n >= 12 ? ((const float *)((const uint8_t *)a + 16))[2] : 0.f, n >= 16 ? ((const float *)((const uint8_t *)a + 16))[3] : 0.f); mtl_sub_update((const uint8_t *)a + 16, d, n); break; }
             case OP_SET_RT: {
                 const p_set_rt *r = a;
+                g_fb_rtn++;
                 if (defer_begin_q(p)) break;
                 int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
                 if (g_enc && !pend && R.has_rt && tbdr_on() && rt_range_same(&R.rt,r)) {
@@ -12302,7 +12361,7 @@ void mtl_exec(const uint8_t *p) {
             case OP_COPY_T2B: copy_t2b(a); break;
             case OP_COPY_T2T: copy_t2t(a); break;
             case OP_DRAW_TEX: draw_tex(a); break;
-            case OP_CLEAR_TEX: clear_tex(a); break;
+            case OP_CLEAR_TEX: if (!lc_tex(a)) { lc_land(); clear_tex(a); } break;
             case OP_DLSS: dlss_eval(a); break;
             case OP_DISPATCH: if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }
                 dispatch(a); break;

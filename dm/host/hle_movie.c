@@ -236,7 +236,7 @@ static void md_dims(const mdec_t *d, int *w, int *h, int *stride, int *slice) {
 
 // ---------- Host decoding thread ----------
 enum { MDJ_NONE, MDJ_DECODE, MDJ_CLOSE, MDJ_QUIT, MDJ_TAKE };
-static int md_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
+int md_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
 // I420 → NV12 (stride = width, plane height = height); a smaller picture is padded with black, a larger one cropped
 void md_nv12(const vpx_image_t *im, uint8_t *dst, int w, int h) {
     int cw = (int)im->d_w < w ? (int)im->d_w : w, ch = (int)im->d_h < h ? (int)im->d_h : h;

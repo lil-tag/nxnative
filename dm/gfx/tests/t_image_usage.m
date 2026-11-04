@@ -76,8 +76,24 @@ static void image_case(int explicit_image) { @autoreleasepool {
     read_level(tex_mtl(&alias), 1, pixels); same = 1; for (int i = 0; i < 16; i++) same &= pixels[i] == (i == 5 ? 0x3400 : 0x3a00);
     CHECK(same, "sampled alias sees the image write and untouched pixels");
 } }
+// Profile key image_write_late: a render target flagged as an image stays without the shader-write usage (and keeps lossless compression) until a shader writes it
+static void late_image_case(void) { @autoreleasepool {
+    tex_t texture = {.magic=MAGIC('T','E','X',0), .serial=99601, .off=3ull << 20};
+    texture.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_R16F, .flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE, .width=8, .height=8, .depth=1, .levels=1, .samples=1};
+    nvn_tex_layout(&texture.d, &texture.L); mtl_tex_init(&texture);
+    id<MTLTexture> old = tex_mtl(&texture);
+    CHECK(old && !(old.usage & MTLTextureUsageShaderWrite) && (old.usage & MTLTextureUsageRenderTarget), "a render target flagged as an image is made without the shader-write usage");
+    mtl_sub_begin(); memset(&R, 0, sizeof R); mtl_reg_image(603, &texture, NULL);
+    NvProg *program = [NvProg new]; NvShader *shader = [NvShader new]; program->sh[5] = shader;
+    shader->rf.nb = 1; shader->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .dtt=MTLTextureType2D, .dpf=NVN_DPF_FLOAT, .reg=0, .rw=1};
+    S.img[5][0] = 603; image_prepare(program, 0x20);
+    id<MTLTexture> upgraded = tex_mtl(&texture);
+    CHECK(upgraded != old && (upgraded.usage & MTLTextureUsageShaderWrite), "the first shader that writes it adds the usage");
+    mtl_sub_commit(); mtl_drain();
+} }
 int main(void) { @autoreleasepool {
-    mtl_init(); image_case(0); image_case(1);
+    setenv("DM_NVN_IMAGE_LATE", "1", 1);
+    mtl_init(); image_case(0); image_case(1); late_image_case();
     printf("explicit image usage: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

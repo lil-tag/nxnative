@@ -919,9 +919,10 @@ static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
     size = (size + 7) & ~7u;
     for (int tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
-        // A record over half the memory the game last added means the game sized it for the device's smaller commands, where it would not run out: lend, do not call back.
-        // Smash uploads each news picture through a 256-byte command buffer whose callback calls a null handler (main+0x31be0); the host's copy record takes 216 of them
-        if (!o->cb || tries == 2 || (o->cmd_size && size + keep > o->cmd_size / 2)) {
+        // Profile key cmd_lend_half: a record over half the memory the game last added is lent for, without calling back. Smash uploads each news picture through a 256-byte command buffer whose callback
+        // calls a null handler (main+0x31be0), and the host's copy record takes 216 of them. Not for every game: Mario Tennis Fever starts its recordings in 256-byte blocks too, with a working callback,
+        // and the segments lent for them went back to the pool when the game next gave out those 256 bytes, with their lists still called (stale lists, then a runaway or a crash)
+        if (!o->cb || tries == 2 || (DM_GAME_CMD_LEND_HALF && o->cmd_size && size + keep > o->cmd_size / 2)) {
             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size + keep);
             size_t sz = hostseg_size(o, 0, size + keep); cmd_new_segment(o, hostseg_take(o, sz), sz); break;
         }
@@ -2692,6 +2693,37 @@ int nvn_sparse_alias(uint64_t lo, uint64_t hi) {
         uint64_t base = (uint64_t)(uintptr_t)v->base;
         r = lo < base + v->len && base < hi;
     }
+    pthread_mutex_unlock(&g_vp_mu); return r;
+}
+// Whether two guest ranges share memory: a sparse pool's pages resolved through its page table, anything else is its own memory. Each call walks both ranges, so nvn_mtl.m keeps each texture's interval until a mapping changes.
+// Mario Tennis Fever keeps its textures and render targets in sparse pools: "may alias" for all of them ended a pass before every draw of its crowd's 128x128 pictures
+typedef struct { const uint8_t *lo, *hi; } mem_run;
+enum { MEM_RUNS = 256 };
+static int vp_mem_runs(uint64_t a, uint64_t n, mem_run *run) {   // caller holds g_vp_mu; → runs, -1 when there are more than MEM_RUNS
+    const struct vpool *v = NULL;
+    for (int k = 0; k < g_nvp && !v; k++) if (a >= (uint64_t)(uintptr_t)g_vp[k]->base && a < (uint64_t)(uintptr_t)g_vp[k]->base + g_vp[k]->len) v = g_vp[k];
+    if (!v) { run[0] = (mem_run){(const uint8_t *)a, (const uint8_t *)a + n}; return 1; }
+    int nr = 0; uint64_t base = (uint64_t)(uintptr_t)v->base, end = a - base + n;
+    for (uint64_t o = (a - base) & ~0xFFFull; o < end; o += 0x1000) {
+        const vpte *e = o < v->size ? vpt_get(v, o) : NULL; const uint8_t *p = e ? e->phys : NULL;
+        if (!p) continue;
+        if (nr && run[nr - 1].hi == p) { run[nr - 1].hi = p + 0x1000; continue; }
+        if (nr == MEM_RUNS) return -1;
+        run[nr++] = (mem_run){p, p + 0x1000};
+    }
+    return nr;
+}
+// The memory behind a guest range as one interval: 1 and [lo, hi) (empty when nothing is mapped), 0 when it is scattered (nvn_mem_overlap then compares it page by page)
+int nvn_mem_interval(uint64_t a, uint64_t n, uint64_t *lo, uint64_t *hi) {
+    static mem_run r[MEM_RUNS];   // under g_vp_mu
+    pthread_mutex_lock(&g_vp_mu); int nr = vp_mem_runs(a, n, r); if (nr == 1) { *lo = (uint64_t)r[0].lo; *hi = (uint64_t)r[0].hi; } else if (nr == 0) *lo = *hi = 0; pthread_mutex_unlock(&g_vp_mu);
+    return nr == 0 || nr == 1;
+}
+int nvn_mem_overlap(uint64_t a, uint64_t an, uint64_t b, uint64_t bn) {
+    static mem_run ra[MEM_RUNS], rb[MEM_RUNS];   // under g_vp_mu
+    pthread_mutex_lock(&g_vp_mu);
+    int na = vp_mem_runs(a, an, ra), nb = vp_mem_runs(b, bn, rb), r = na < 0 || nb < 0;   // too scattered to tell: as if they did
+    for (int i = 0; i < na && !r; i++) for (int j = 0; j < nb && !r; j++) r = ra[i].lo < rb[j].hi && rb[j].lo < ra[i].hi;
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
 // Textures of a sparse pool, read through its page table (see the sparse pools above): whether a pool is one, a copy of a texture's bytes (unmapped pages read as 0; → bytes not mapped),

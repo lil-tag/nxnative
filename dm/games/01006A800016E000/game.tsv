@@ -38,3 +38,7 @@ sys_resource	0x1000000
 # ---- Shader split (shader_split.py; data.arc's current files, smash_arc.py) ----
 shader_groups	/data.arc/SHDR=shdr /data.arc/EFFN=effect /data.arc/SARC=ui
 shader_note	Super Smash Bros. Ultimate shaders
+
+# ---- Command memory ----
+# Each news picture is uploaded through a 256-byte command buffer whose memory callback calls a null handler (main+0x31be0): lend, do not call back
+cmd_lend_half	on

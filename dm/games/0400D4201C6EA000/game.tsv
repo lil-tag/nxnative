@@ -38,3 +38,7 @@ shader_note	Mario Tennis Fever shaders
 # ---- Graphics ----
 # As the console does; the game uses them a little, with no visible difference, and in a rally they save about 0.7 of 9.5 ms of GPU
 render_cond	on
+# The lights of an Adventure map sample their target and the atmosphere samples it next, with no barrier between: a kept snapshot put the unlit scene back
+fb_fresh_pass	on
+# Its render targets carry the image flag and shaders write 9 of them: shader-write usage from the start costs them lossless compression, 17.9 against 14.4 ms of GPU in a match on an M4
+image_write_late	on
