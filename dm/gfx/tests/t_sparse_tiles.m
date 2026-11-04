@@ -34,6 +34,7 @@ static int same(id<MTLTexture> m, unsigned level, unsigned x, unsigned y, unsign
     return 1;
 }
 int main(void) { @autoreleasepool {
+    setenv("DM_NVN_IMAGE_LATE", "1", 1);   // the case below, whatever the game profile says
     mtl_init();
     enum { W = 4096, LEVELS = 13, TILE = 0x10000, TW = 128 };
     size_t plen = 64u << 20;
@@ -99,6 +100,12 @@ int main(void) { @autoreleasepool {
     CHECK("nothing uploaded", g_bp_up_bytes == nblit);
     map_at((1ull << 30) + 3 * TILE, TILE, 20 * TILE, 0); (void)resolve(&gx);
     CHECK("and unmapped", g_sp_live == live1);
+    // Profile key image_write_late leaves a sparse image shader-writable from the start: tex_upgrade cannot remake a sparse texture, so a shader's first write would go to the dummy image
+    NVNtexture ix; h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 3ull << 30);
+    CHECK("sparse image", h_nvnTextureInitialize(&ix, &tb));
+    id<MTLTexture> im = resolve(&ix);
+    CHECK("a sparse image is placement sparse", im.isSparse);
+    CHECK("and shader-writable from the start", im.usage & MTLTextureUsageShaderWrite);
     // Small: the whole upload, as before
     NVNtexture sx; h_nvnTextureBuilderSetWidth(&tb, 512); h_nvnTextureBuilderSetHeight(&tb, 512); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 2ull << 30);
     CHECK("small sparse texture", h_nvnTextureInitialize(&sx, &tb));
