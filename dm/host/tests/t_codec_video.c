@@ -66,7 +66,8 @@ int main(void) {
     for (uint32_t i = 0; i < 2; i++) assert(!h_cv_vp9reg(dec, i, pool[i], 0));
     for (uint32_t i = 0; i < 2; i++) { assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == i && sync.magic == CV_SYNC && sync.gen == 0 && h_gs_trywait(&sync)); }
     assert(h_cv_vp9acq(&idx, &sync, dec) == CV_NONE);
-    assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
+    // A buffer not yet released, whose handle is signalled, answers as an empty picture of the stream's size; it may be asked twice before it goes back (Mario Kart World's player does)
+    for (int i = 0; i < 2; i++) { w = h = cw = ch = 0; ts = 1; eos = true; assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 0 && !eos); }
 
     // Released: acquirable again with a new handle that signals once a picture is in the buffer; the picture's properties and its NV12 / RGBA readback
     h_cv_vp9rel(dec, 0, sync);

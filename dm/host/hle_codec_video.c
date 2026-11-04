@@ -388,13 +388,16 @@ static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
     drain(d, 0);
     pthread_mutex_unlock(&d->mu);
 }
+// Answers whenever the buffer's sync handle reads as signalled, which includes a buffer not yet released (sync_reached, generation 0): it reads as an empty picture of the stream's size at time 0.
+// Mario Kart World's player gives such a buffer back while it is not yet playing, and once it is, asks for its properties and aborts on any error (main+0x19e6f40, main+0x19e8110)
 static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {
     cv_dec *d = cv_of(t); if (!d || i >= CV_BUFS) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
-    int ok = d->buf[i].filled;
-    if (ok) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0; }
+    int filled = d->buf[i].filled, fresh = !filled && d->buf[i].reg && !d->buf[i].gen;
+    if (filled) { *w = *cw = d->buf[i].w; *h = *ch = d->buf[i].h; *ts = d->buf[i].ts; *eos = d->buf[i].eos != 0; }
+    else if (fresh) { *w = *cw = d->w; *h = *ch = d->h; *ts = 0; *eos = false; static int once; if (!once++) LOG("[codec] %s decoder %u: properties of buffer %u asked before its first release: an empty picture", k_cv_name[d->codec], d->id, i); }
     pthread_mutex_unlock(&d->mu);
-    return ok ? 0 : CV_NONE;
+    return filled || fresh ? 0 : CV_NONE;
 }
 static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] nn::codec: an encrypted input buffer: protected streams are not served"); return CV_R(2004); }
 // Each decoder type's entry points, by their names in the SDK (the work buffer, the two Initialize overloads without the H.264 parameter sets, …)

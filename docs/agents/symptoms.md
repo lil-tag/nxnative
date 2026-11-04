@@ -334,6 +334,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a movie stays black with the game waiting behind it, the decoder made and no `first picture` line (`Submit…InputBuffer` never called). Or `[RED] nn::codec VP9: Corrupt frame detected`, then `Keyframe / intra-only frame required`, each time about 6 s into a movie or after skipping in one. → [The submission-ready event counted as packets](../reference/movies.md#the-submission-ready-event-counted-as-packets)
 - a crash in `nn::codec::video::InitializeAv1DecoderByTransferMemory` when a movie starts. → [AV1 movies through SDK 22's decoder](../reference/movies.md#av1-movies-through-sdk-22s-decoder)
 - an abort in `nn::codec` (the SDK's own decoder client, which opens a service the host does not have) when a movie starts in a game built with SDK 19 for the Switch 2. → [SDK 19's decoder forms](../reference/movies.md#sdk-19s-decoder-forms)
+- rarely, as a movie starts and before its `first picture` line: `game called nn::diag abort: Result 0x1c286f, call site main+0x19e8190` on `VideoDecoderThread` (Mario Kart World), or `CRASH sig=11 addr=0x88 pc=main+0x8a1f8 lr=nro0+0xd16210` (Mario Tennis Fever, seen only with the signal delayed). → [A buffer not yet released answers its properties](../reference/movies.md#a-buffer-not-yet-released-answers-its-properties)
 
 ## Audio
 
