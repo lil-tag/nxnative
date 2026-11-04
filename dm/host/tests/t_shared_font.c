@@ -44,7 +44,7 @@ int g_nmod;
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }
 int dm_sdk_major(void) { return 20; }
-int dm_main_imports(const char *prefix) { (void)prefix; return 1; }
+int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; }
@@ -103,7 +103,7 @@ int main(void) {
     CHECK(count == 1 && init, "exact Initialize forced registration exists once");
     if (!init) return 1;
     ext_f = (font_t){extension, sizeof extension};
-    uint8_t compact[64] = {0}, work[32]; memcpy(compact, &marker, 4);
+    static uint8_t work[FONT_WORK_MIN]; uint8_t compact[64] = {0}; memcpy(compact, &marker, 4);
     small_done = 1; small_f = (font_t){0}; small_payload = compact + 8; status = 7;
     int eng, n, i0;
     CHECK(init(&eng, work, sizeof work) == 0 && inits == 1 && init_buf == work && init_size == sizeof work, "Initialize forwards its arguments");
@@ -118,6 +118,12 @@ int main(void) {
         CHECK(seen_data == compact + 8 && seen_self == &eng && seen_name == name && seen_index == 3 && seen_capacity == 5, "with the compact payload, other arguments as given");
         CHECK(get_error(&eng) == 0, "the compact font loads in the fresh engine");
     }
+    // An engine with less memory than the stand-in needs runs on host memory, and a retry stays on it
+    uint8_t tiny[32]; int small_eng;
+    init(&small_eng, tiny, sizeof tiny);
+    CHECK(init_buf != tiny && init_buf && init_size == FONT_WORK_MIN, "a small work buffer is replaced by host memory");
+    void *host_work = init_buf; n = calls; i0 = inits; engine_err = 201;
+    CHECK(load(&small_eng, name, standard, 3, 5) == status && calls == n + 2 && inits == i0 + 1 && init_buf == host_work && init_size == FONT_WORK_MIN, "the retry starts the engine afresh on the same host memory");
     n = calls; i0 = inits;
     CHECK(load(&eng, name, standard, 3, 5) == status && calls == n + 1 && inits == i0, "an engine that holds a font is never started afresh");
     init(&eng, work, sizeof work); engine_err = 0;

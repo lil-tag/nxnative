@@ -20,6 +20,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** probes confirmed the legacy result: the framework presents at interval 1, VFR reports interval 1 with ratio 0.5, and when a frame runs long the game steps back to 2 with ratio 1, so the game speed does not change.
 - **Note:** the zeldaret/botw decompilation (`VFR.cpp`) gave the semantics; 1.9.0's addresses were found by the constants (`60 / interval`, the `fmov s11, #2.0` floor).
 
+### A regress run stops when another app takes the key window
+
+- **Symptom:** `scripts/regress.py` reports a hang (`no frame after … s`, a state dump with every game thread waiting) in some runs of Tears of the Kingdom, baseline and candidate alike; the log's last focus line before it is `oe focus state → 2`, with no `→ 1` after it.
+- **Cause:** the game window resigning key is sent to the game as out of focus, and Tears of the Kingdom stops presenting while out of focus. During an unattended run another app (a build, a notification, another session's window) takes the key window now and then. Every hung TotK run in the harness's folder on 2026-11-03/04 had that focus line without a return; the runs that passed either had none or regained focus within a second.
+- **Fix:** `regress.py` runs the host with `DM_FOCUS_KEEP=1` (`front_mac.m`): the game stays in focus while its window is up, whichever app is active; minimizing still counts.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game) (the regress route, 2026-11-03 and 04).
+
 ### Benchmark captures perturb the measured frame pacing
 
 - **Symptom:** otherwise stationary gameplay benchmarks show roughly 125–135 ms frame spikes at their verification screenshots; adaptive-cap results vary between runs.
@@ -274,6 +281,17 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** PR #79: the PR's author ran [Hades](../../dm/games/0100535012974000/README.md) at 144 Hz (switched in a window then): the HUD's frame interval line steady at 16.7 ms, where it jumped before.
 - **Check:** here (a built-in 120 Hz screen, a multiple of every link rate) a harness drove `front_mac.m` asked for 50 fps: no switch in the window, 120 → 50 Hz in fullscreen, 120 Hz again on leaving it, and 120 Hz after quitting in fullscreen; at 60 fps and with `DM_SCREEN_MATCH=0` nothing switched.
 - **Not checked:** the link's new range after a switch has not run here (Hades windowed and fullscreen paced at 60 as before).
+
+### macOS Game Mode holds the GPU at its lowest clock
+
+- **Symptom:** a Mac game in fullscreen holds 60 fps for 45 s to 3 minutes, then the same work takes about twice the GPU time (Tears of the Kingdom 10.5 → 19.7 ms) and the frame step falls to 30 fps. `powermetrics` shows the GPU at its lowest clock (338 MHz on an M4 Pro) while it is 72–98% busy, with thermal pressure nominal. Probes back to 60 fail, because the clock does not rise within a probe. `gamepolicyd` logs `Game mode enabled` and `Set DPS to 2`.
+- **Cause:** macOS's Game Mode, not the host. A full-screen Metal app of about 100 lines, with no host code and about 6.5 M GPU cycles a frame, ran at 618 MHz and 9.5 ms for about 160 s in Game Mode, then at 338 MHz, 18 ms and 94% busy to the end of its 5 minutes. With Game Mode off it ran at 924 MHz and about 7 ms and spent no time at 338 MHz (one run each, M4 Pro on AC power; the run with Game Mode off also sat at a flat 56.3 fps from 120 s, unexplained). Why Game Mode does this is open, and no public API is known that keeps the clock up while Game Mode is on.
+- **Fix:** a workaround for a platform limit: `dm/mac/pack_app.py` writes `LSSupportsGameMode` false, Apple's documented off switch, and keeps the games category. In the `gamepolicyd` log a new bundle with the key false gets no gaming session. The cost, not measured, is what else Game Mode does: doubled Bluetooth sampling for controllers and AirPods, and lower priority for background tasks.
+- **Limit:** macOS remembers an app it has labelled a game. On a bundle ID already launched in Game Mode, with the key true or omitted, re-packing with the key false kept Game Mode on, also with `GCSupportsGameMode` false and after `lsregister -u` (5 launches with the key off, same version number; a version change is not checked). So a re-packed app needs the player's switch once: in full screen, Command-Esc, Game Overlay, Settings, Game Mode; macOS keeps that per game. A reporter rebuilt a known bundle with an `entertainment` category and got no Game Mode; not checked here.
+- **Caution:** do not script full-screen launches in a row. After eight in about three minutes on macOS 27.2, `WindowServer` logged `timed out fence` from 12 s after the last app quit, with none in the 85 minutes before, and the Mac panicked (`userspace watchdog timeout: no successful checkins from WindowServer`). Another session's game had exited 18 s before the last app quit, so the launches are the likely trigger, not a proven one.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), by two reporters on M4 Pro Macs ([GitHub issue #349](https://github.com/seedds/nxnative/issues/349)).
+- **Check:** `test_nsp_mac_app.py` checks the key. To see a game's state: `/usr/bin/log show --last 10m --predicate 'process == "gamepolicyd"' --style compact | grep -E "Found game|Game mode|DPS"`.
+- **Not checked:** a game packed with the key false (the reporter's runs turned Game Mode off with the Game Overlay switch and with the category); other Apple chips; iOS, whose project still declares the key true (the same collapse is only suspected there, PR #314).
 
 ### A game opened from a fullscreen app stays a window
 

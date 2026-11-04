@@ -1,5 +1,14 @@
 # Packing
 
+## Game packages
+
+### PFS0 file-name table missing its final NUL
+
+- **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.
+- **Cause:** older NSZ writers omitted the final NUL in the PFS0 string table. The final name is bounded by the table length, but the Python scanner required a terminator and LibHac reads names as NUL-terminated strings.
+- **Fix:** the scanner accepts the table boundary as the end of the final name. `nx_extract` supplies LibHac with a virtual header containing the missing NUL followed by the original payload storage. File offsets remain relative to that payload, and the source package and encrypted NCA bytes are unchanged. Truncated tables and out-of-table name offsets still fail. Synthetic package tests cover both readers and payload preservation.
+- **Found on:** Moving Out 2 (`010065D018172000`), base 1.1.254 NSP and update 1.3.315 NSZ. Package reading was checked, not gameplay.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
@@ -22,6 +31,13 @@
 - **Cause:** the launcher `dmsh_xlate` is universal, but `dmsh_xlate.dll` beside it was arm64-only (`PE32+`, machine `0xAA64`). A .NET build for a runtime ID (`-r osx-arm64`) sets an executable's `PlatformTarget` to that architecture unless the project names one, and the repository had no single command for rebuilding the translator, so the bundled dll flipped between AnyCPU and arm64 from one rebuild to the next. The Ryujinx libraries stayed AnyCPU, because a library does not take its architecture from the runtime ID.
 - **Fix:** `dmsh_xlate.csproj` pins `<PlatformTarget>AnyCPU</PlatformTarget>`, so a build with any `-r`, or none, gives an AnyCPU dll (`PE32`, machine `0x14C`, IL only). `dm/tools/tests/test_xlate_anycpu.py` reads the PE/CLI headers of every dll in `dmsh_xlate_bin` and the launcher's Mach-O header, and fails when a dll is tied to an architecture or the launcher lacks x86_64 or arm64; it needs no .NET. The rebuilt translator writes the same SPIR-V and reflection files as the arm64-only one (9,556 shaders compared byte for byte).
 - **Found on:** an Intel MacBook Pro building any game ([GitHub issue #803](https://github.com/seedds/nxnative/issues/803), which bisected the flips). Applies to every game.
+
+### The Vulkan shader step fails with `Argument list too long: 'xcrun'`
+
+- **Symptom:** `vk_shaders.py` stops with `OSError: [Errno 7] Argument list too long: 'xcrun'` after the Metal compiles, in the `metallib` link.
+- **Cause:** `metallib()` passed every `.air` file as an absolute path in one command. The NSP script runs it with `TMPDIR` set to the work folder, so each path holds that folder's name; a game with thousands of generated modules (Super Mario Galaxy: 3,083 captured shaders, more with the dual-source variants) under a long NSP folder name exceeds macOS's 1 MB `ARG_MAX`.
+- **Fix:** `metallib()` runs from the files' common folder with relative paths and an absolute output path, so the command length no longer depends on the work folder's name.
+- **Found on:** [Super Mario Galaxy](../../dm/games/010099C022B96000/README.md), with its dump in a folder named after both games of the cartridge. Applies to every Vulkan game's shader step.
 
 ## IPA archives
 
@@ -124,6 +140,13 @@
 - **Fix:** `dm/mac/pack_app.py` `detritus()` drops those names from `selected_inputs`, so neither the pack nor `DMModuleFiles` sees them. `copy()` passes `-X` where it copies and not where it clones (`cp` refuses the two together), and the host goes through `shutil.copy` instead of `copy2`, so a copy creates none of them. `strip_detritus()` runs before `codesign` reads the staged bundle, runs again after `xattr -cr` when `codesign` still refuses one, and runs once more after signing. On APFS nothing changes: no sidecar exists there, and the two passes are a stat walk. `dm/tools/tests/test_nsp_mac_app.py` puts a `._` file in every input folder and checks that it is not selected, does not reach the bundle, and is not in `DMModuleFiles`.
 - **Found on:** the NX2Apple fork's users, packing Mac apps on an external drive ([LNPANDY/NX2Apple#486](https://github.com/LNPANDY/NX2Apple/issues/486)); reproduced on an exFAT disk image made with `hdiutil create -fs ExFAT`, where the same inputs pack, sign and pass `codesign --verify --strict` with the change and stop three ways without it. Applies to every game's Mac app.
 
+### External shader directories contain AppleDouble metadata
+
+- **Symptom:** on an exFAT or FAT drive, shader splitting stops with `ValueError: not a version 2 shader code archive` or `[RED] /glslc_capture/._…: no GLSLC output`.
+- **Cause:** `shader_split.py` selected captured `.glslc` programs and decoded `.ushaderbytecode` archives by extension alone. macOS AppleDouble sidecars retain that extension, but their `._<name>` files contain metadata rather than shader bytes.
+- **Fix:** exclude `._` names when listing both external shader directories, including `DM_GLSLC_CAPTURE` and `DM_UE_SHADERS` overrides. Other dot-prefixed names remain valid inputs, and malformed real inputs still fail their normal validation.
+- **Found on:** an external-drive build reported in [issue #229's follow-up](https://github.com/seedds/nxnative/issues/229#issuecomment-6563450365). That commenter used a different, unnamed game; this fixes the sidecar failure, not the original Metroid Prime 4 port.
+
 ## Compressed inputs
 
 ### NSZ decompression rejects `--keys`
@@ -140,6 +163,15 @@
 - **Fix:** `dm/tools/nso.py` decodes such segments with the [`zbic`](https://pypi.org/project/zbic/) package (Kinnay's, zstd with Atmosphère's ZBIC changes), imported only for a flag-bit-7 module, so an LZ4 title needs nothing new; every segment is still held to the header's size and SHA-256. zstd has no fixed ratio bound, so a ZBIC segment is held only to its own size, where an LZ4 one is also held to 255 bytes per stored byte. Install it with the other tools (README, step 1).
 - **Check:** Well Dweller's `main` decodes to 85,370,056 bytes with segments `0x39680d0 / 0x9f7e74 / 0x9b1930`, every SHA-256 matching; `dm/tools/tests/test_nso.py` checks that a flag-bit-7 module whose segments are not ZBIC is an Error naming ZBIC.
 - **Found on:** [Well Dweller](../../dm/games/0100217023F6C000/README.md) (SDK 22.2.0).
+
+## Versions with different modules
+
+### A version without one of the profile's modules stops the host at boot
+
+- **Symptom:** `FATAL open <folder>/subsdk1.fixups.tsv` right after the host starts, or `build_ipa.sh` stops with `no rewritten module …/subsdk1`, for a version that has no such module.
+- **Cause:** a game's versions can differ in modules: Mario Kart World's base game has `main`, `subsdk0` (a Mono runtime) and `sdk`, its update 1.8.0 `main`, `subsdk0` (the movie player), `subsdk1` (a C library) and `sdk`. The host, the rewrite, the IPA and the shader split all took the one `modules` list of the profile.
+- **Fix:** `modules` lists all of them in load order, and each `build` row names its own (`game.py` `build_modules`; a row naming one `modules` lacks is an error). The host loads the modules of the row of `main`'s build, read from the rewriter's `main.fixups.tsv` (`main.c` `profile_modules`, from `DM_GAME_BUILD_MODULES`), and all of `modules` for a build with no row. `build_ipa.sh` takes the same list (`game.py modules <id> <folder>`). The NSP script rewrites, sizes `mem_used` from and splits the modules the packed version's ExeFS holds (`Game.modules_in`), and a derived profile's row names those (`derive_profile`).
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md): the base game boots with its three modules from a profile that lists four. Applies to every game. `test_game_profile.py` checks the rows and the list.
 
 ## Package identification
 

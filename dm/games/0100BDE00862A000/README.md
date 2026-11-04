@@ -10,7 +10,7 @@ On the Mac (2026-11-01, built from the NSPs with `nxplay --build-only`): the ope
 |---|---|---|
 | Shaders in Nitro archives | `dm/gfx/tools/shader_split.py` (`narc_members`, `camelot_member`, `camelot_lz`) | see [Shaders in Camelot's Nitro archives](../../../docs/reference/shaders.md#shaders-in-camelots-nitro-archives) |
 | `nvnCommandBufferCopyCommands` copies the records | `dm/gfx/nvn/hle_nvn.c` | the game records commands once and copies them into each frame's buffer; see [`CopyCommands` copies the records](../../../docs/reference/nvn-objects.md) |
-| An sRGB and a linear texture over the same storage share one Metal texture | `dm/gfx/nvn/nvn_mtl.m` (`alias_twin`) | the composite and anti-aliasing passes write one format and read the other; see [sRGB and linear textures over the same storage](../../../docs/reference/rendering.md) |
+| An sRGB and a linear texture over the same storage share one Metal texture | `dm/gfx/nvn/nvn_mtl.m` (`srgb_twins`) | the composite and anti-aliasing passes write one format and read the other; see [Textures of an sRGB / linear pair over the same storage](../../../docs/reference/rendering.md#textures-of-an-srgb--linear-pair-over-the-same-storage) |
 | `movie::Decoder` base-object constructors (`C2`) | `dm/host/hle_movie.c` | the movie library constructs its decoder through the base-object constructor; see [movies](../../../docs/reference/movies.md) |
 | Compact shared font | `dm/host` (PR #797) | the game's font loading needs the compact stand-in |
 | Memory: the 4 GB layout, `sys_resource 0x0` | [`game.tsv`](game.tsv) | the NPDM declares no system resource, as for Dark Souls Remastered |

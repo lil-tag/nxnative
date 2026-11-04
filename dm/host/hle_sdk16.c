@@ -154,10 +154,27 @@ static font_eng_t *font_eng_of(void *self, int add) {   // with font_mu held
     *e = (font_eng_t){self, NULL, 0, 0};
     return e;
 }
-HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "font engine initialize: the SDK's, with the work buffer recorded for the compact shared font's retry (h_font_LoadFont)", uint32_t, h_font_Initialize, void *self, void *buf, unsigned size) {
+// A game sizes an engine's work memory for Nintendo's fonts, and the stand-in is far larger: Arial Unicode's 23 MB did not fit the 50 KB Mario Tennis Fever gives its second engine (nn::font's texture
+//   cache keeps one per glyph thread), so FSS_load_font ran out of memory (error 201), SetFont failed with 301, every lookup of the "?" glyph missed and nro0+0xaef8a8 crashed on a null pointer. An engine
+//   gets at least FONT_WORK_MIN of host memory then; the game's buffer stays unused, and GetPointerToWorkBuffer still gives it back, which is what the game frees
+#define FONT_WORK_MIN 0x80000   // what the same game's first engine gets, in which that font loads
+#define FONT_ENGINES 16
+static struct { void *self, *game, *host; } font_work[FONT_ENGINES];
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine10InitializeEPvj", "font engine initialize: the SDK's, on a work buffer the stand-in font fits in, recorded for the compact shared font's retry (h_font_LoadFont)", uint32_t, h_font_Initialize, void *self, void *buf, unsigned size) {
     pthread_once(&font_load_once, font_load_init);
     if (!font_init) die("ScalableFontEngine::Initialize not found in the guest");
-    pthread_mutex_lock(&font_mu); font_eng_t *e = font_eng_of(self, 1); e->buf = buf; e->size = size; e->fonts = 0; pthread_mutex_unlock(&font_mu);
+    pthread_mutex_lock(&font_mu);
+    if (size < FONT_WORK_MIN) {
+        int i = 0;
+        while (i < FONT_ENGINES && font_work[i].self && font_work[i].self != self) i++;
+        if (i < FONT_ENGINES) {
+            if (!font_work[i].host && !(font_work[i].host = malloc(FONT_WORK_MIN))) die("font engine work memory");
+            font_work[i].self = self; font_work[i].game = buf;
+            buf = font_work[i].host; size = FONT_WORK_MIN;
+        } else LOG("[RED] more than %d font engines with a small work buffer: this one keeps the game's", FONT_ENGINES);
+    }
+    font_eng_t *e = font_eng_of(self, 1); e->buf = buf; e->size = size; e->fonts = 0;
+    pthread_mutex_unlock(&font_mu);
     return font_init(self, buf, size);
 }
 // The standard stand-in is loaded first; only when the engine then reports an error, and holds no other font, is it started afresh and given the compact one, so every game that loads the
@@ -179,8 +196,17 @@ HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "shared font BFT
     if (!atomic_fetch_add(&n, 1) || e2) LOG("%sshared font: LoadFont failed with %u on the standard stand-in, the compact one gives %u (engine %p, work buffer %u bytes)", e2 ? "[RED] " : "", e, e2, self, eng.size);
     return r;
 }
+HLE_FORCE("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv", "the game's own buffer, also when the engine runs on host memory", void *, h_font_WorkBuffer, void *self) {
+    static void *(*get)(void *);
+    if (!get) get = guest_sym("_ZN2nn6fontll18ScalableFontEngine22GetPointerToWorkBufferEv");
+    void *game = NULL;
+    pthread_mutex_lock(&font_mu);
+    for (int i = 0; i < FONT_ENGINES && font_work[i].self; i++) if (font_work[i].self == self) game = font_work[i].game;
+    pthread_mutex_unlock(&font_mu);
+    return game ? game : get(self);
+}
 // The address points straight at the TTF (past the 8-byte header) and the size excludes the header, except for a game on SDK 11 or later whose main imports ScalableFontEngineHelper::Decode
-//   (dm_sdk_major, dm_main_imports; the profile's shared_font overrides). Super Mario 3D World + Bowser's Fury (SDK 10) records shared fonts as type 0 (main+0x975658), calls no Decode and hands the address
+//   (dm_sdk_major, dm_game_imports; the profile's shared_font overrides). Super Mario 3D World + Bowser's Fury (SDK 10) records shared fonts as type 0 (main+0x975658), calls no Decode and hands the address
 //   as is to ScalableFontEngine::LoadFont; with the header LoadFont fails with error 403 and SetFont with 301, every lookup of the "?" glyph then misses, and main+0x6c73c0 crashes on a null pointer.
 //   Odyssey (7), Link's Awakening (8), Age of Calamity (9) and Three Houses (6) take it the same way. Unity's player hands the address and size of every type straight to FreeType's FT_New_Memory_Face
 //   (Patrick's Parabox, SDK 13, Unity 2020.3: main+0x2390b0 maps its OS font names Switch_Font_STD … Switch_Font_NIN_Extended to types 0-5, then main+0x23b2e0), as libnx homebrew does with the same pl offsets;
@@ -192,7 +218,7 @@ static size_t font_skip(void) {
 #ifdef DM_GAME_SHARED_FONT_TTF
         skip = DM_GAME_SHARED_FONT_TTF ? 8 : 0; LOG("shared font: %s (game profile shared_font)", skip ? "the TTF itself" : "BFTTF header + TTF");
 #else
-        int m = dm_sdk_major(), dec = dm_main_imports("_ZN2nn6fontll24ScalableFontEngineHelper6Decode"); skip = DM_SDK_OLD(m) || !dec ? 8 : 0;
+        int m = dm_sdk_major(), dec = dm_game_imports("_ZN2nn6fontll24ScalableFontEngineHelper6Decode"); skip = DM_SDK_OLD(m) || !dec ? 8 : 0;
         LOG("shared font: %s (SDK %d, main %s ScalableFontEngineHelper::Decode)", skip ? "the TTF itself" : "BFTTF header + TTF", m, dec ? "imports" : "does not import");
 #endif
     }
