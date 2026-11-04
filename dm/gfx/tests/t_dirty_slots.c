@@ -18,6 +18,12 @@ static int g_fail;
     if (want_ != got_) g_fail++; \
 } while (0)
 
+#include <mach/mach.h>
+static int page_writable(const void *p) {   // by the page's protection, as the GPU's mapping takes it
+    vm_address_t at = (vm_address_t)p; vm_size_t rs = 0; vm_region_basic_info_data_64_t vi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &at, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&vi, &cnt, &obj) != KERN_SUCCESS) return -1;
+    return (vi.protection & VM_PROT_WRITE) != 0;
+}
 static void *page_map(void) {
     void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) { perror("mmap"); exit(2); }
@@ -99,5 +105,22 @@ int main(void) {
     EXPECT("B no longer tracked after destroying B", 0, nvn_dirty_tracked(pb, tex));
     nvn_dirty_remove_range(pa);
     munmap(blk, 4 * pg);
+
+    // A pool becomes GPU-resident with all its pages writable, or the GPU's mapping of it stays read-only (Mario Tennis Fever's menus)
+    uint8_t *hb = mmap(NULL, 3 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    nvn_dirty_add_range(hb, 3 * pg);
+    nvn_dirty_protect(hb, 3 * pg);
+    uint64_t hs = nvn_dirty_now();
+    EXPECT("a protected page is read-only", 0, page_writable(hb + pg));
+    nvn_dirty_hold_writable(hb + pg, pg);
+    EXPECT("held: the pool's page is writable", 1, page_writable(hb + pg));
+    EXPECT("held: the page beside it is not touched", 0, page_writable(hb));
+    nvn_dirty_unhold();
+    EXPECT("what lay on the page counts as written", 1, nvn_dirty_since(hb + pg, 64, hs));
+    EXPECT("what lay beside it does not", 0, nvn_dirty_since(hb, 64, hs));
+    nvn_dirty_protect(hb + pg, pg);
+    EXPECT("protected again once the hold ends", 0, page_writable(hb + pg));
+    nvn_dirty_remove_range(hb);
+    munmap(hb, 3 * pg);
     return g_fail != 0;
 }

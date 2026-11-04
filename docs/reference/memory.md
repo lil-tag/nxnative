@@ -340,6 +340,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** profile key `mem_map_limit` (`hle_svc.c`): a map past the pool fails with ResultLimitReached, and the used memory `GetInfo` reports counts the mapped pages, as on Horizon (without that, the startup probe itself, sized as total − used, was refused).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) (2.0.2, SDK 19.3.11; one boot). Measured: one refused 4 MB map, the 3.15 GB unmap, the same map again.
 
+### A pool made resident with a page write-protected
+
+- **Symptom:** the whole GPU restarts, every frame, until macOS stops taking the game's work: `Caused GPU Address Fault Error` or `Discarded (victim of GPU error/recovery)` in the log, then `command buffer execution error` thousands of times, a frozen picture and GPU times of 0. The kernel logs `GPURestart…` and `Deny submissions/ignore app[dmhost]`. Other games on the Mac lose their work too. It depends on where the pool landed, so about one run in three.
+- **Cause:** the dirty-page tracker write-protects a texture's pages (`nvn_dirty.c`). Host pages are 16 KB and guest pools only 4 KB aligned, so that can take a page of a neighbouring pool. A pool's buffer made resident with such a page read-only stays faulting on GPU writes (I infer the GPU's mapping takes the page's protection then; the fix is what was measured). `/Library/Logs/DiagnosticReports/gpuEvent-*.ips` holds `BIF0 page fault`, `is_read: false` and the address, until the system stops writing them.
+- **Fix:** `pool_res` holds the pool's pages writable and blocks protection while the buffer goes into the residency set (`nvn_dirty_hold_writable`). A texture on such a page counts as written and is uploaded once more.
+- **Check:** `t_dirty_slots`. [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md), to its menu video and a few seconds past it: 4 resets in 12 runs before, 0 in 12 with protection off, 0 in 16 with the fix, 6 of those 16 with the read-only page there just before the lift.
+- **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md)'s menus, once the save had finished a match. Runs from a fresh save did not show it, as the pool landed elsewhere.
+
 ### Unmapped guest memory stays resident
 
 - **Symptom:** after a large `UnmapPhysicalMemory` or heap shrink, RAM does not come back. `phys_footprint` may still fall, so it hides this: the `guest` class in `DM_MEMSTAT` shows the real figure.

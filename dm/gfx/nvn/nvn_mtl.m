@@ -549,7 +549,8 @@ static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / t
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
 static void pool_res(int i) {
     if (g_pools[i].res) return;
-    res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+    nvn_dirty_hold_writable((void *)g_pools[i].base, g_pools[i].buf.length); res_add(g_pools[i].buf); res_commit(); nvn_dirty_unhold();   // see nvn_dirty_hold_writable
+    g_pools[i].res = 1; g_pool_res_n++;
 }
 // A large pool in chunks. Metal wires a zero-copy buffer whole while it is in the residency set, so one buffer over a large pool pins all of it, whatever the GPU reads. Mario Kart World's 2,427 MB
 // graphics pool: the GPU has touched 1,111 MB by the first race, 326 MB of it in the last 1,500 frames; on a 16 GB Mac the driver then spent half its time wiring and unwiring (3.2 s of a 6 s Metal System

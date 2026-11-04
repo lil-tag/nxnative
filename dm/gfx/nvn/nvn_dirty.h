@@ -8,6 +8,8 @@ void nvn_dirty_stat(int *live, int *peak, int *cap);                // number of
 void nvn_dirty_remove_range(const void *mem);                     // Pool destruction: restore protected pages to writable and mark invalid
 int nvn_dirty_tracked(const void *addr, size_t len);
 void nvn_dirty_protect(const void *addr, size_t len);              // Set the covered pages read-only
+void nvn_dirty_hold_writable(void *addr, size_t len);             // A pool becomes GPU-resident: these pages are writable, and nothing protects any page, until nvn_dirty_unhold
+void nvn_dirty_unhold(void);
 void nvn_dirty_protect_sparse(const void *addr, size_t len);       // The same, for the pages behind a placement sparse tile: a later write to one moves nvn_dirty_sparse_writes
 uint64_t nvn_dirty_sparse_writes(void);                            // Writes so far to pages protected that way
 uint64_t nvn_dirty_now(void);                                      // Current generation: take the content's stamp before nvn_dirty_protect and before reading it
