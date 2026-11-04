@@ -68,12 +68,14 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_nro
 	$(B)/t_symbols
 	$(B)/t_online
+	$(B)/t_online_lan
 	$(B)/t_online_tls
 	$(B)/t_bcat
 	$(B)/t_web
 run: $(B)/t_nro
 run: $(B)/t_symbols
 run: $(B)/t_online
+run: $(B)/t_online_lan
 run: $(B)/t_online_tls
 run: $(B)/t_bcat
 run: $(B)/t_web
@@ -85,6 +87,8 @@ $(B)/t_online_tls: t_online_tls.c ../hle_online.c ../hle_online_ssl.c ../hle_onl
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-unused-result -I.. $(GINC) -o $@ t_online_tls.c -framework Security -framework CoreFoundation
 $(B)/t_online: t_online.c ../hle_online.c ../online.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_online.c
+$(B)/t_online_lan: t_online_lan.c ../hle_online.c ../online.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_online_lan.c
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols

@@ -3,6 +3,7 @@
 #include "../hle_online.c"
 
 void dm_thread_native_wait(int entering) { (void)entering; }
+void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }
 module_t *module_of(const void *p) { (void)p; return NULL; }   // the trace's caller names (DM_NEXTENDO_TRACE): no game modules here
 static __thread int g_guest_errno;
 int *dm_guest_errno(void) { return &g_guest_errno; }

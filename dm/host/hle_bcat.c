@@ -105,7 +105,7 @@ static void fetch(void) {
 }
 static void load(void) {
     char path[1024]; size_t len;
-    if (dm_online()) fetch();
+    if (dm_online() && !dm_lan()) fetch();
     if (!zip_path(path, sizeof path, ".zip") || !(g_zip = read_all(path, &len))) return;
     if (!parse(g_zip, len, &g_ent, &g_nent, 0)) { free(g_zip); g_zip = NULL; LOG("[online] bcat: %s is not a zip, nothing delivered", path); return; }
     LOG("[online] bcat: delivery cache from the Nextendo package, %d files", g_nent);
@@ -116,14 +116,14 @@ static bcat_ent *find(const char *dir, const char *file) { for (int i = 0; i < g
 
 HLE_FORCE("_ZN2nn4bcat10InitializeEv", "data delivery init (connects to the bcat service); the host has none, no-op", void, h_bcat_Init, void) {}
 HLE_FORCE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", "mount delivery cache: offline fails (nothing delivered); online the Nextendo package, fetched at the first mount or sync", Result, h_bcat_Mount, void) {
-    if (!dm_online()) return RES_FAIL;
+    if (!dm_online() || dm_lan()) return RES_FAIL;
     ensure(); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4bcat27UnmountDeliveryCacheStorageEv", "unmount delivery cache", void, h_bcat_Unmount, void) {}
 // The SDK's DeliveryCacheProgress keeps the status at +0x58 and the result at +0x5c, and its Update does nothing while its service object (+0x20) is null, as the constructor leaves it,
 // so the finished state written here stays: GetStatus answers 9 (done, Pokémon Scarlet main+0x2adb620), GetResult success
 static Result bcat_sync(uint8_t *progress) {
-    if (!dm_online()) return RES_FAIL;
+    if (!dm_online() || dm_lan()) return RES_FAIL;
     ensure();
     *(uint32_t *)(progress + 0x58) = 9; *(uint32_t *)(progress + 0x5c) = RES_OK;
     return RES_OK;

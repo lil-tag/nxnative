@@ -41,7 +41,7 @@ static void load(void) {
     else LOG("[online] not signed in to Nextendo (%s): online play stops at the game's login", path);
 }
 static void load_once(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, load); }
-int dmo_signed_in(void) { if (!dm_online()) return 0; load_once(); return g_acct.pid && g_acct.token[0]; }
+int dmo_signed_in(void) { if (!dm_online() || dm_lan()) return 0; load_once(); return g_acct.pid && g_acct.token[0]; }
 uint64_t dmo_pid(void) { load_once(); return g_acct.pid; }
 const char *dmo_name(void) { load_once(); return g_acct.name; }
 

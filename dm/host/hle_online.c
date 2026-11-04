@@ -1,4 +1,4 @@
-// Online play through Nextendo Network (DM_NEXTENDO=1): the network status, sockets and name lookups that hle_net.c, hle_offline.c and hle_misc.c otherwise cut.
+// Online play through Nextendo Network (DM_NEXTENDO=1), or a game's LAN mode with the same sockets (DM_LAN=1): the network status, sockets and name lookups that hle_net.c, hle_offline.c and hle_misc.c otherwise cut.
 // Off by default; each of those stubs asks dm_online() first and comes here when it is on, so a front end turns online play on with one switch (settings.tsv) and nothing else.
 // Sockets are the Mac's own, behind a table of small guest descriptors (select's fd_set holds 1024, and the host process may have more files open than that).
 // Name lookups send Nintendo's server names to Nextendo's servers, with the rules Ryujinx-Nextendo uses, and resolve every other name normally.
@@ -24,9 +24,15 @@
 #include <time.h>
 #include <unistd.h>
 
+// DM_LAN=1: the same real sockets for a game's own LAN mode, on the local network only: no Nextendo, no sign-in, no name lookups. With DM_NEXTENDO=1 as well, Nextendo wins: it allows all of that too
+int dm_lan(void) {
+    static int on = -1;
+    if (on < 0) { const char *l = getenv("DM_LAN"), *n = getenv("DM_NEXTENDO"); on = l && *l == '1' && !(n && *n == '1'); if (on) LOG("[online] LAN play is on"); }
+    return on;
+}
 int dm_online(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("DM_NEXTENDO"); on = e && *e == '1'; if (on) LOG("[online] Nextendo online play is on"); }
+    if (on < 0) { const char *e = getenv("DM_NEXTENDO"); int nx = e && *e == '1'; on = nx || dm_lan(); if (nx) LOG("[online] Nextendo online play is on"); }
     return on;
 }
 
@@ -214,6 +220,7 @@ int dmo_getsockopt(int g, int level, int opt, void *v, unsigned *n) {
         int64_t *o = v; o[0] = tv.tv_sec; o[1] = tv.tv_usec; *n = 16; return 0;
     }
     socklen_t l = n ? *n : 0;
+    if (v) dm_guest_write_prepare(v, l);
     if (getsockopt(h, level, opt, v, &l) < 0) return (int)TRACED(fail(), "getsockopt %d level %#x opt %#x", g, level, opt);
     if (level == SOL_SOCKET && opt == SO_ERROR && v && l >= 4) *(int *)v = lx_errno(*(int *)v);
     if (n) *n = l;
@@ -237,6 +244,7 @@ int dmo_fcntl(int g, int cmd, int arg) {
 }
 long dmo_recvfrom(int g, void *b, unsigned long n, int f, void *a, unsigned *al) {
     HOST_OR_EBADF(g); struct sockaddr_storage ss; socklen_t len = sizeof ss;
+    dm_guest_write_prepare(b, n);   // a write-protected page (graphics tracking) would fail the system call with EFAULT
     long r = BLOCKING(recvfrom(h, b, n, msg_flags(f), a ? (struct sockaddr *)&ss : NULL, a ? &len : NULL));
     if (r < 0) return TRACED(fail(), "recv %d n %lu flags %#x", g, n, f);
     char w[64]; if (dmo_trace()) { if (a) sa_str(&ss, w, sizeof w); else strlcpy(w, "connected peer", sizeof w); }
@@ -248,6 +256,9 @@ long dmo_sendto(int g, const void *b, unsigned long n, int f, const void *a, uns
     HOST_OR_EBADF(g);
     if (!a) return TRACED(ok_or_fail(BLOCKING(send(h, b, n, msg_flags(f)))), "send %d n %lu flags %#x", g, n, f);
     struct sockaddr_storage ss; socklen_t len = sa_in(&ss, a, al); char w[64];
+    // A console can send to 255.255.255.255; the Mac answers EHOSTUNREACH. The adapter's own broadcast address reaches the same machines
+    struct sockaddr_in *in = (struct sockaddr_in *)&ss;
+    if (ss.ss_family == AF_INET && in->sin_addr.s_addr == INADDR_BROADCAST) { uint32_t m, me = dmo_ip(&m); if (me) in->sin_addr.s_addr = me | ~m; }
     return TRACED(ok_or_fail(BLOCKING(sendto(h, b, n, msg_flags(f), (struct sockaddr *)&ss, len))), "sendto %d n %lu flags %#x to %s", g, n, f, sa_str(&ss, w, sizeof w));
 }
 // sendmsg / recvmsg (gRPC's TCP reads and writes): the SDK's msghdr is BSD's, the Mac's (Jamboree's main+0xb36324: iovlen at +0x18, controllen at +0x28, flags at +0x2c); only the address is translated
@@ -433,8 +444,9 @@ int dmo_getaddrinfo(const char *node, const char *service, const void *hints, vo
     if (hints) memcpy(&h, hints, offsetof(struct addrinfo, ai_addrlen));   // flags, family, type, protocol
     h.ai_family = AF_INET;   // Nextendo is IPv4, and the Mac's AF_INET6 is not the guest's
     char name[256]; const char *ip = NULL;
-    if (node) { fill_env(name, sizeof name, node); node = name; ip = dmo_redirect(name); }
+    if (node) { fill_env(name, sizeof name, node); node = name; ip = dm_lan() ? NULL : dmo_redirect(name); }
     if (ip) { h.ai_flags |= AI_NUMERICHOST; remember(ip, name); }
+    if (dm_lan()) h.ai_flags |= AI_NUMERICHOST;   // LAN play stays on the local network: a server name fails as it does offline
     int r = BLOCKING(getaddrinfo(ip ? ip : node, service, &h, (struct addrinfo **)res));
     if (node) LOG("[online] lookup %s: %s%s", node, r ? gai_strerror(r) : ip ? ip : "resolved", ip ? " (Nextendo)" : "");
     struct in_addr numeric;

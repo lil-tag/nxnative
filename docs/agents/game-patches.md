@@ -86,6 +86,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 3 | 0 | 0 | `build` → `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Mario Kart World](#mario-kart-world) | 2 | 0 | 0 | 0 | 0 | `build` |
 | [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
@@ -378,6 +379,16 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.6.2225577 `main`** `5b76a43b…` ([patches.py:13](../../dm/games/0100317013770000/patches.py#L13))
   - cut `+0x94354`: Unused 272-byte slot pool: 4,194,304 -> 65,536 slots, 1.06 GB -> 17 MB of address space (mov w1,#0x10000)
+
+### Mario Kart World
+
+[Mario Kart World](../../dm/games/0400C3F00006E000/README.md), `0400C3F00006E000`, [patches.py](../../dm/games/0400C3F00006E000/patches.py).
+
+- **`build`**, runtime, at goal, checked: the same change as a cheat on 1.0.0 opened the room list, created a room and reached "Waiting for players to join": Wireless Play opens the LAN rooms. The host has no nn::ldn and the game's own switch to LAN does nothing on this build; a host with nn::ldn would drop this
+
+- **v0 `main`** `9e244438…` ([patches.py:8](../../dm/games/0400C3F00006E000/patches.py#L8))
+  - cut `+0xd5433c`: Wireless Play, 1 player: cbz w9 → nop, always LAN (mode 3)
+  - cut `+0xd54364`: Wireless Play, 2 players: cbz w9 → nop, always LAN (mode 3)
 
 ### Monster Hunter Rise
 

@@ -9,6 +9,7 @@
 
 module_t *g_mod; int g_nmod;
 void dm_thread_native_wait(int entering) { (void)entering; }
+void dm_guest_write_prepare(void *addr, size_t len) { (void)addr; (void)len; }
 module_t *module_of(const void *p) { (void)p; return NULL; }   // the trace's caller names (DM_NEXTENDO_TRACE): no game modules here
 int *dm_guest_errno(void) { return NULL; }
 static char g_sysdata[300];   // the firmware's CertStore archive folder (hle_fs.c), a made-up one here

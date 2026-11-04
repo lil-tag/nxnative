@@ -4,6 +4,9 @@
 #include "online.h"
 #include <stdatomic.h>
 
+// SDK 20's form (Mario Kart World): SetAllocator stays in the SDK, this one would connect to bsd:s itself. Its Wireless Play and LAN mode ask before opening a socket
+HLE_FORCE("_ZN2nn6socket8internal10InitializeEi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_InitConc, int concurrency) { (void)concurrency; return RES_OK; }
+HLE_FORCE("_ZN2nn6socket13IsInitializedEv", "whether the bsd socket service is connected: the host's sockets are there when online", unsigned, h_socket_IsInit, void) { return dm_online() ? 1 : 0; }
 HLE_FORCE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_socket_Initialize, const void *cfg) { (void)cfg; return RES_OK; }
 HLE_FORCE("_ZN2nn4nifm10InitializeEv", "connects to the nifm network management service; offline (cut)", Result, h_nifm_Initialize, void) { return RES_OK; }
 // The request is asynchronous on Horizon: SubmitNetworkRequest only hands it to the nifm service, and IsNetworkRequestOnHold stays true until the service has evaluated it, so a query

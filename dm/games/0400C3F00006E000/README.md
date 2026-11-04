@@ -97,3 +97,13 @@ Update 1.8.0 (v917504, SDK 21.4.0) is not on this Mac. Pull request #1116 ported
 - [SDK 19's decoder forms](../../../docs/reference/movies.md#sdk-19s-decoder-forms)
 - [A version without one of the profile's modules stops the host at boot](../../../docs/reference/packing.md#a-version-without-one-of-the-profiles-modules-stops-the-host-at-boot)
 - 1.8.0, by pull request #1116: [The camera through the graphics system](../../../docs/reference/services.md#the-camera-through-the-graphics-system), [Layer HDR metadata](../../../docs/reference/services.md#layer-hdr-metadata), the SDK 21 forms in [The Joy-Con mouse pointer](../../../docs/reference/services.md#the-joy-con-mouse-pointer) and [GameChat at boot](../../../docs/reference/services.md#gamechat-at-boot)
+
+## LAN play
+
+`DM_LAN=1` (the LAN play setting) gives the game real sockets on the local network, without Nextendo, a sign-in or name lookups (`dm/host/hle_online.c`). Wireless Play then opens the LAN rooms: `patches.py` makes it pick LAN on 1.0.0, because `nn::ldn` is cut and the guides' L+R and left stick click did nothing here. The row keeps its Wireless Play label.
+
+The room search is a 325-byte broadcast on UDP 35000; a room answers with 620 bytes, sent to the address and port the search came from. UDP 49152 is bound too, and carries nothing until a second player joins.
+
+Checked on 1.0.0 with one window: the room list, Create Room, "Waiting for players to join", and a room answering a replayed search. Not checked: a second player joining, or a race. That takes a second machine: on one Mac both windows bind the same two ports, and a unicast reaches only the first socket bound.
+
+Open: a GPU page fault with another game running. Two entries into the room list froze at frames 2071 and 2083, both with a second game open: macOS then ignores the drawing of the process it blames, so a window freezes until it is restarted. Alone on the same scripted route, 3 of 3 entries were clean with no GPU restart in the kernel log. That points at the overlap rather than LAN, though 3 runs are not proof, and which game triggers it is unknown.

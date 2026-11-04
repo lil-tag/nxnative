@@ -9,6 +9,7 @@ static char g_url[1100];
 
 static int g_online = 1;
 int dm_online(void) { return g_online; }
+int dm_lan(void) { return 0; }
 static int checks, fails;
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
