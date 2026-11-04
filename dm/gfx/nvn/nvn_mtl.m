@@ -2658,16 +2658,23 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
 // tile all of whose pages the game has mapped, uploading that tile's 64 KB; a tile the game unmaps is unmapped and its heap tile reused once the GPU is past it. Each layer's mip tail is
 // one Metal tile, mapped and uploaded when the game has mapped all of its storage. Only a texture that would take at least SP_MIN bytes made whole goes this way: smaller ones keep the
 // whole upload (pkg_upload_), which costs no mapping operations and keeps sparse_view's level clamp (Monster Hunter Rise's streamed clothes)
+// Tiles with the same memory behind them share one heap tile, as the GPU's page table points them at one physical page: Mario Kart World maps 3.47 GB of virtual pages of its sparse pools onto 0.98 GB of
+// physical pages (kartnative's measure). Key: the guest's physical address of the tile's 64 KB (one run, nvn_sparse_backing) with the pixel format, which decides the tile's layout in the heap tile.
+// Block-compressed and GPU-written textures only for now: those are the ones measured (DM_NVN_SPARSE_SHARE=0 gives every tile its own). A GPU-written tile's memory is its heap tile, so its content
+// follows the physical memory wherever the game maps it, and a heap tile of its own starts as zeros
 #define SP_TILE 0x10000u
 #define SP_HEAP_TILES 4096u            // 256 MB placement heaps
 #define SP_MIN (64ull << 20)
 int nvn_sparse_tile_state(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp);   // hle_nvn.c
+uint64_t nvn_sparse_backing(const void *pool, uint64_t a);
 uint64_t nvn_sparse_log_seq(const void *pool); int nvn_sparse_log_read(const void *pool, uint64_t *seq, uint64_t (*out)[2], int max); void nvn_sparse_protect_tile(const void *pool, uint64_t a, uint64_t n);
 static pthread_mutex_t g_sp_mu = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableArray *g_sp_heaps;     // id<MTLHeap>, SP_HEAP_TILES tiles each; a slot is heap × SP_HEAP_TILES + tile
 static uint32_t *g_sp_free; static size_t g_sp_nfree, g_sp_freecap;
 static struct sp_late { uint32_t slot; uint64_t fence; } *g_sp_late; static size_t g_sp_nlate, g_sp_latecap;   // unmapped tiles, free once the GPU is past the fence
-static uint64_t g_sp_live, g_sp_peak;
+static uint64_t g_sp_live, g_sp_peak, g_sp_tiles;   // heap tiles in use, their most; Metal tiles mapped to them
+static uint32_t *g_sp_refs; static uint64_t *g_sp_keys; static size_t g_sp_nslots;   // per heap tile: the Metal tiles on it; the memory a shared one holds (0: one tile's own)
+static nvn_hmap g_sp_shared = {.klen = 8};   // share key → heap tile + 1
 static int sp_slot(uint32_t *out) {   // caller holds g_sp_mu
     uint64_t done = atomic_load(&g_done); size_t k = 0;
     for (size_t i = 0; i < g_sp_nlate; i++) {
@@ -2685,12 +2692,23 @@ static int sp_slot(uint32_t *out) {   // caller holds g_sp_mu
         uint32_t base = (uint32_t)g_sp_heaps.count * SP_HEAP_TILES; [g_sp_heaps addObject:h]; res_add(h);
         if (g_sp_freecap < g_sp_nfree + SP_HEAP_TILES) { g_sp_freecap = g_sp_nfree + SP_HEAP_TILES; g_sp_free = realloc_or_die(g_sp_free, g_sp_freecap * sizeof *g_sp_free, "the sparse tile list"); }
         for (uint32_t i = SP_HEAP_TILES; i-- > 0;) g_sp_free[g_sp_nfree++] = base + i;   // taken from the front of the heap first
-        MLOG("sparse tiles: placement heap %lu (256 MB), %llu tiles mapped", (unsigned long)g_sp_heaps.count, (unsigned long long)g_sp_live);
+        g_sp_refs = realloc_or_die(g_sp_refs, (base + SP_HEAP_TILES) * sizeof *g_sp_refs, "the sparse tile list"); g_sp_keys = realloc_or_die(g_sp_keys, (base + SP_HEAP_TILES) * sizeof *g_sp_keys, "the sparse tile list");
+        memset(g_sp_refs + base, 0, SP_HEAP_TILES * sizeof *g_sp_refs); memset(g_sp_keys + base, 0, SP_HEAP_TILES * sizeof *g_sp_keys); g_sp_nslots = base + SP_HEAP_TILES;
+        MLOG("sparse tiles: placement heap %lu (256 MB), %llu tiles mapped on %llu heap tiles", (unsigned long)g_sp_heaps.count, (unsigned long long)g_sp_tiles, (unsigned long long)g_sp_live);
     }
     *out = g_sp_free[--g_sp_nfree]; if (++g_sp_live > g_sp_peak) g_sp_peak = g_sp_live;
     return 1;
 }
-static void sp_slot_free(uint32_t slot) {   // caller holds g_sp_mu; the GPU may still read the tile through work committed so far and the submission being built
+// A heap tile for one Metal tile: the one already holding key's memory if there is one (key 0: one of its own). *own: it is new to this tile, its content undefined. Caller holds g_sp_mu
+static int sp_slot_for(uint64_t key, uint32_t *out, int *own) {
+    uint32_t have = key ? (uint32_t)(uintptr_t)nvn_hm_get(&g_sp_shared, &key) : 0; *own = !have;
+    if (have) { *out = have - 1; g_sp_refs[*out]++; }
+    else { if (!sp_slot(out)) return 0; g_sp_refs[*out] = 1; g_sp_keys[*out] = key; if (key) nvn_hm_put(&g_sp_shared, &key, (void *)(uintptr_t)(*out + 1)); }
+    g_sp_tiles++; return 1;
+}
+static void sp_slot_free(uint32_t slot) {   // one Metal tile less on it, the last one frees it. Caller holds g_sp_mu; the GPU may still read the tile through work committed so far and the submission being built
+    g_sp_tiles--; if (--g_sp_refs[slot]) return;
+    if (g_sp_keys[slot]) { nvn_hm_del(&g_sp_shared, &g_sp_keys[slot]); g_sp_keys[slot] = 0; }
     if (g_sp_nlate == g_sp_latecap) { g_sp_latecap = g_sp_latecap ? 2 * g_sp_latecap : 1024; g_sp_late = realloc_or_die(g_sp_late, g_sp_latecap * sizeof *g_sp_late, "the sparse tile list"); }
     g_sp_late[g_sp_nlate++] = (struct sp_late){slot, atomic_load(&g_fence) + 1}; g_sp_live--;
 }
@@ -2701,8 +2719,9 @@ static void sp_slot_free(uint32_t slot) {   // caller holds g_sp_mu; the GPU may
     uint32_t *slot;                    // per tile: heap slot + 1, 0 = not mapped
     uint64_t *nmap;                    // mapped tiles per level (the tail at ntiled)
     uint64_t gen, stamp;               // the page table's generation and the dirty-page stamp at the last look
-    int gpu;                           // the GPU writes it (a render target or image): tiles are mapped and unmapped, nothing is uploaded
-    uint64_t seq;                      // the pool's change log up to here has been handled (nvn_sparse_log_read)
+    int gpu;                           // the GPU writes it (a render target or image): tiles are mapped and unmapped, nothing is uploaded but the zeros of a new heap tile of its own
+    int share; MTLPixelFormat pf;      // its tiles share heap tiles by their memory (see above)
+    uint64_t seq;                     // the pool's change log up to here has been handled (nvn_sparse_log_read)
     uint64_t wseen, wframe;            // nvn_dirty_sparse_writes and the frame at the last look for rewritten tiles
 } @end   // tex is weak: the NvPkg of a packaged texture owns it, a GPU texture owns its NvSparse (sparse_gpu_look)
 @implementation NvSparse
@@ -2722,6 +2741,8 @@ static NvSparse *sparse_make(const tex_t *t, int gpu, __strong id<MTLTexture> *m
     MTLSizeAndAlign sa = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (sa.size < SP_MIN) return nil;
     NvSparse *s = [NvSparse new];
+    static int share_on = -1; if (share_on < 0) { const char *e = getenv("DM_NVN_SPARSE_SHARE"); share_on = !e || atoi(e); }
+    s->share = share_on && (gpu || fmt_compressed(t->d.format)); s->pf = d.pixelFormat;
     s->gpu = gpu; s->tw = tw; s->th = th; s->ntiled = (uint32_t)n; s->levels = (uint32_t)d.mipmapLevelCount; s->layers = (uint32_t)MAX(d.arrayLength, 1u); s->layer_size = t->L.layer_size;
     uint32_t k = 0;
     for (uint32_t l = 0; l < s->ntiled; l++) {
@@ -2757,8 +2778,8 @@ static void sp_op(sp_ops *o, MTL4UpdateSparseTextureMappingOperation x) {
     if (o->n == o->cap) { o->cap = o->cap ? 2 * o->cap : 64; o->op = realloc_or_die(o->op, o->cap * sizeof *o->op, "the sparse mapping operations"); }
     o->op[o->n++] = x;
 }
-// One look at a texture's tiles: the mapping operations by heap (unmaps, with no heap, last) and the staging of what is uploaded
-typedef struct { NvSparse *s; const tex_t *t; id<MTLTexture> tex; sp_ops *ops; uint32_t nheaps; uint8_t *tile, *tail; id<MTLBuffer> stg; size_t stg_off; uint64_t up, unmapped; int bw, bh, bpb, force; } sp_look;
+// One look at a texture's tiles: the mapping operations by heap (unmaps, with no heap, first: a tile whose memory moved is unmapped and mapped again in one look) and the staging of what is uploaded
+typedef struct { NvSparse *s; const tex_t *t; id<MTLTexture> tex; sp_ops *ops; uint32_t nheaps; uint8_t *tile, *tail; id<MTLBuffer> stg; size_t stg_off; uint64_t up, unmapped; int bw, bh, bpb, force, zeroed; } sp_look;
 static void sp_stg(sp_look *c, size_t n) {
     if (c->stg && c->stg_off + n <= c->stg.length) return;
     c->stg = [g_dev newBufferWithLength:MAX((size_t)8 << 20, n) options:MTLResourceStorageModeShared]; if (!c->stg) MDIE("sparse upload staging");
@@ -2777,14 +2798,30 @@ static void sp_tile(sp_look *c, uint32_t y, uint32_t i) {
             sp_slot_free(*sl - 1); *sl = 0; s->nmap[lev]--; c->unmapped++; }
         return;
     }
+    // A tile's share key, asked for only when it is mapped anew or its pages changed (a new mapping in its range is a change): a tile whose memory moved leaves the heap tile it shared.
+    // A packaged tile mapped anew is uploaded below, so the heap tile holds the memory as it is now, whoever uploaded it before; a GPU-written one's memory is the heap tile
+    uint64_t key = 0;
+    if (s->share && !is_tail && (!*sl || (st & 2))) { uint64_t p = nvn_sparse_backing(t->pool, a); key = p ? p | (uint64_t)s->pf << 52 | (uint64_t)(s->gpu != 0) << 62 : 0; }
+    if (*sl && s->share && !is_tail && (st & 2) && key != g_sp_keys[*sl - 1]) {
+        sp_op(&c->ops[c->nheaps], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeUnmap, rg, lev, y, 0});
+        sp_slot_free(*sl - 1); *sl = 0; s->nmap[lev]--;
+    }
     if (*sl && (s->gpu || (!(st & 2) && !c->force))) return;   // the GPU's own writes are in the tile: a CPU write to its pages is not looked at
     if (!*sl) {
-        uint32_t slot; if (!sp_slot(&slot)) return;
+        uint32_t slot; int own; if (!sp_slot_for(key, &slot, &own)) return;
         uint32_t hi = slot / SP_HEAP_TILES; if (hi >= c->nheaps) { RED_ONCE(146, "sparse tiles: more than 64 heaps made in one look"); sp_slot_free(slot); return; }
         c->ops[hi].heap = g_sp_heaps[hi];
         sp_op(&c->ops[hi], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeMap, rg, lev, y, slot % SP_HEAP_TILES});
         *sl = slot + 1; s->nmap[lev]++;
-        if (s->gpu) { c->up++; return; }   // mapped, for the GPU to write
+        if (s->gpu) {   // mapped, for the GPU to write. A heap tile of its own starts as zeros, as new Switch memory reads 0 (a heap tile is undefined, or what its last user left)
+            if (own && c->bpb) for (uint32_t tl = lev; tl < (is_tail ? s->levels : lev + 1); tl++) {
+                uint32_t lw = MAX(t->d.width >> tl, 1u), lh = MAX(t->d.height >> tl, 1u), x0 = is_tail ? 0 : tx * s->tw, y0 = is_tail ? 0 : ty * s->th, w = is_tail ? lw : MIN(s->tw, lw - x0), h = is_tail ? lh : MIN(s->th, lh - y0);
+                size_t pitch = (size_t)((w + c->bw - 1) / c->bw) * c->bpb, rows = (h + c->bh - 1) / c->bh;
+                sp_stg(c, pitch * rows); memset((uint8_t *)c->stg.contents + c->stg_off, 0, pitch * rows);
+                up_blit_add_at(c->stg, c->stg_off, pitch, pitch * rows, MTLSizeMake(w, h, 1), c->tex, y, tl, MTLOriginMake(x0, y0, 0)); c->stg_off += (pitch * rows + 255) & ~(size_t)255; c->zeroed = 1;
+            }
+            c->up++; return;
+        }
     }
     // the content: protected before it is read, as any packaged texture's, so a later CPU write shows (nvn_dirty_sparse_writes, sparse_look)
     nvn_sparse_protect_tile(t->pool, a, n);
@@ -2846,15 +2883,16 @@ static void sparse_sync(NvSparse *s, const tex_t *t, int whole) {
     pthread_mutex_unlock(&g_sp_mu);
     free(c.tile); free(c.tail); free(ranges);
     s->gen = gen; s->stamp = stamp;
-    for (uint32_t h = 0; h <= c.nheaps; h++) {
+    for (uint32_t i = 0; i <= c.nheaps; i++) {
+        uint32_t h = i ? i - 1 : c.nheaps;   // the unmaps first
         if (!c.ops[h].n) continue;
         id<MTLHeap> heap = c.ops[h].heap; MTL4UpdateSparseTextureMappingOperation *op = c.ops[h].op; size_t n = c.ops[h].n;
         rec_queue_block(^{ [g_q4 updateTextureMappings:stex heap:heap operations:op count:n]; free(op); });
     }
     free(c.ops);
-    if (c.up && !s->gpu) { [g_up_texs addObject:stex]; if (!g_cb) up_flush(); }
-    static uint64_t looks; if (c.up || c.unmapped) { looks++; if (looks <= 20 || looks % 500 == 0) MLOG("sparse texture ser=%llu: %llu tiles uploaded, %llu unmapped; %llu tiles mapped in all, peak %llu (%llu MB)", (unsigned long long)t->serial,
-                                                        (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp_live, (unsigned long long)g_sp_peak, (unsigned long long)(g_sp_peak * SP_TILE >> 20)); }
+    if ((c.up && !s->gpu) || c.zeroed) { [g_up_texs addObject:stex]; if (!g_cb) up_flush(); }
+    static uint64_t looks; if (c.up || c.unmapped) { looks++; if (looks <= 20 || looks % 500 == 0) MLOG("sparse texture ser=%llu: %llu tiles uploaded, %llu unmapped; %llu tiles mapped in all on %llu heap tiles, peak %llu (%llu MB)", (unsigned long long)t->serial,
+                                                        (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp_tiles, (unsigned long long)g_sp_live, (unsigned long long)g_sp_peak, (unsigned long long)(g_sp_peak * SP_TILE >> 20)); }
 }
 // A look when the texture is resolved: only a new mapping request in its pool costs anything, or a write to a page behind a tile, which no game seen does to a tile it keeps mapped (none of 42,072
 // in Mario Kart World's first race): at most once a second, as the look goes over every mapped tile, so a rewritten tile can show its old content for that long

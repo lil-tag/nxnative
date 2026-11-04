@@ -99,6 +99,46 @@ int main(void) { @autoreleasepool {
     CHECK("nothing uploaded", g_bp_up_bytes == nblit);
     map_at((1ull << 30) + 3 * TILE, TILE, 20 * TILE, 0); (void)resolve(&gx);
     CHECK("and unmapped", g_sp_live == live1);
+    // GPU-written tiles with one physical memory share a heap tile: what the GPU writes through one reads through the other, a heap tile of its own starts as zeros, a tile whose memory moves leaves
+    NvSparse *gs = objc_getAssociatedObject(g, &g_sp_key);
+    map_at(1ull << 30, TILE, 24 * TILE, 1); map_at((1ull << 30) + TILE, TILE, 24 * TILE, 1); map_at((1ull << 30) + 2 * TILE, TILE, 25 * TILE, 1); (void)resolve(&gx);
+    CHECK("three GPU-written tiles on two heap tiles", g_sp_live == live1 + 2 && gs->slot[0] && gs->slot[0] == gs->slot[1] && gs->slot[2] && gs->slot[2] != gs->slot[0]);
+    id<MTLBuffer> paint = [g_dev newBufferWithLength:(size_t)TW * TW * 4 options:MTLResourceStorageModeShared]; memset(paint.contents, 0xAB, paint.length);
+    id<MTLCommandBuffer> pcb = q_cb(); id<MTLBlitCommandEncoder> pe = [pcb blitCommandEncoder];
+    [pe copyFromBuffer:paint sourceOffset:0 sourceBytesPerRow:TW * 4 sourceBytesPerImage:(size_t)TW * TW * 4 sourceSize:MTLSizeMake(TW, TW, 1) toTexture:g destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [pe endEncoding]; [pcb commit]; [pcb waitUntilCompleted];
+    uint32_t *want = calloc(4, (size_t)TW * 3 * TW); for (size_t i = 0; i < (size_t)TW * 3 * TW; i++) want[i] = (i % (TW * 3)) < 2 * TW ? 0xABABABABu : 0;
+    CHECK("written through a tile, it reads through the other; the third is zeros", same(g, 0, 0, 0, 3 * TW, TW, want, 3 * TW));
+    map_at((1ull << 30) + TILE, TILE, 26 * TILE, 1); (void)resolve(&gx);
+    CHECK("a tile whose memory moved leaves the shared heap tile", g_sp_live == live1 + 3 && gs->slot[1] != gs->slot[0]);
+    for (size_t i = 0; i < (size_t)TW * 3 * TW; i++) want[i] = (i % (TW * 3)) < TW ? 0xABABABABu : 0;
+    CHECK("and starts as zeros", same(g, 0, 0, 0, 3 * TW, TW, want, 3 * TW));
+    map_at(1ull << 30, 3 * TILE, 0, 0); (void)resolve(&gx);
+    CHECK("all three unmapped: their heap tiles back", g_sp_live == live1 && !gs->slot[0] && !gs->slot[1] && !gs->slot[2]);
+    // Block-compressed tiles share too, within a texture and across two; an uncompressed packaged one (the arrays above) does not
+    h_nvnTextureBuilderSetWidth(&tb, 16384); h_nvnTextureBuilderSetHeight(&tb, 16384); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA_DXT1); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    NVNtexture bx, by; const uint64_t b0 = 3ull << 30, b1 = 4ull << 30;
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, b0); CHECK("compressed sparse texture", h_nvnTextureInitialize(&bx, &tb));
+    h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, b1); CHECK("a second one", h_nvnTextureInitialize(&by, &tb));
+    for (unsigned t = 0; t < 3; t++) for (unsigned i = 0; i < TILE; i++) phys[(32 + t) * TILE + i] = (uint8_t)(i * 13 + t * 91 + 7);
+    map_at(b0, TILE, 32 * TILE, 1); map_at(b0 + TILE, TILE, 32 * TILE, 1); map_at(b0 + 2 * TILE, TILE, 33 * TILE, 1); map_at(b1, TILE, 32 * TILE, 1);
+    id<MTLTexture> bm = resolve(&bx), bn = resolve(&by);
+    NvPkg *bpk = tex_get(((const tex_t *)&bx)->serial), *bpn = tex_get(((const tex_t *)&by)->serial);
+    uint64_t lb = g_sp_live;
+    NvSparse *bs = bpk->ps, *bt = bpn->ps;
+    if (bm.isSparse && bs && bs->share) {
+        CHECK("tiles with one memory share, within a texture", bs->slot[0] && bs->slot[0] == bs->slot[1] && bs->slot[2] && bs->slot[2] != bs->slot[0]);
+        CHECK("and across two", bn.isSparse && bt && bt->slot[0] == bs->slot[0]);
+        uint32_t bw = bs->tw, bh = bs->th, brow = bw / 4 * 8;
+        id<MTLBuffer> rb[3]; id<MTLCommandBuffer> rcb = q_cb(); id<MTLBlitCommandEncoder> re = [rcb blitCommandEncoder];
+        for (unsigned t = 0; t < 3; t++) { rb[t] = [g_dev newBufferWithLength:(size_t)brow * bh options:MTLResourceStorageModeShared];
+            [re copyFromTexture:bm sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(t * bw, 0, 0) sourceSize:MTLSizeMake(bw, bh, 1) toBuffer:rb[t] destinationOffset:0 destinationBytesPerRow:brow destinationBytesPerImage:(size_t)brow * bh]; }
+        [re endEncoding]; [rcb commit]; [rcb waitUntilCompleted];
+        CHECK("tiles with one memory read the same", !memcmp(rb[0].contents, rb[1].contents, rb[0].length) && ((uint8_t *)rb[0].contents)[1]);
+        CHECK("a tile with other memory reads otherwise", memcmp(rb[0].contents, rb[2].contents, rb[0].length));
+        map_at(b0 + TILE, TILE, 34 * TILE, 1); (void)resolve(&bx);
+        CHECK("a tile whose memory moved has a heap tile of its own", g_sp_live == lb + 1 && bs->slot[1] != bs->slot[0] && bs->slot[1] != bs->slot[2]);
+    } else printf("this format's tiles differ here: the compressed sharing checks are skipped\n");
     // Small: the whole upload, as before
     NVNtexture sx; h_nvnTextureBuilderSetWidth(&tb, 512); h_nvnTextureBuilderSetHeight(&tb, 512); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 2ull << 30);
     CHECK("small sparse texture", h_nvnTextureInitialize(&sx, &tb));

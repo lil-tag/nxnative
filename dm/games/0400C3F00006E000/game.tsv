@@ -33,6 +33,10 @@ mem_alias	0x100000000
 mem_stack	0x10000000
 app_pool	0x240000000
 sys_resource	0x4000000
+# The game's NinVirtualAddressHeap takes regions and maps them per block; its free size is what the system reports free (QueryMemoryInfo total - used). On Horizon the used memory counts the
+# pages mapped in the alias region; without this key the host left them out, so the heap's free size never fell and its blocks were never let go. With it the used memory counts them and a map
+# past the pool fails, as on Horizon. Measured with the shared tiles on this base's predecessor: the alias region's peak 1.51 → 1.25 GB, no map refused
+mem_map_limit	on
 
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /Lib/=lib /Layout/=layout
