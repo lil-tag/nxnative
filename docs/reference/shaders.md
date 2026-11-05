@@ -1153,6 +1153,15 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six compute shaders of `FoliageShader.sharcb` (`13002657609092b4` and five others) claim a hash slot with `CAS(slot, 0, index + 1)` and take the old value's index when the slot was taken (0x8c00 in `13002657609092b4`). All six translate now.
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`AtomgCas`).
 
+### Blocks nested past clang's bracket depth
+
+- **Symptom:** `fatal error: bracket nesting level exceeded maximum of 256` from the Metal compile in the shader build; the shader is left out.
+- **Cause:** the translator's structurizer opens a block for every forward branch to a common exit, so a guest loop that the game's compiler unrolled with an early exit after each step nests one block a step. Ocarina of Time's agl_technique_pfx compute shaders walk a 256-element array, each step taking `min(left, a[i])` from it and leaving once nothing is left: 257 levels, past clang's default of 256.
+- **Fix:** the chain's Metal commands pass `-fbracket-depth=1024` (`dmsh_build.py` `MAC_METAL`, `ios_metal.py` `METAL`). Both shaders compile on the Mac and for iOS (2.4 s and 0.6 s).
+- **Open:** the nesting itself. A structurizer that leaves such a chain through one exit (a `break` out of a single loop) would not nest, and would not depend on the limit; it changes every shader's control flow, so it waits for a regression run across games.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): `1f78730053feb036` and `e172bd7ec218ab8e` (`agl_technique_pfx.sharcb`).
+- **Check:** `python3 dm/gfx/tests/test_dmsh_bracket_depth.py` (a 300-deep walk compiles with both commands and fails without the flag).
+
 ### Comparisons with .FTZ
 
 - **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).
