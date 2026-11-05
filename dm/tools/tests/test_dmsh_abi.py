@@ -19,10 +19,9 @@ import dmsh_abi as abi   # noqa: E402
 # a json key spelled like a kind ('c1', 'geometry', 'tex', 'img' in the facts and reflection json), an NVN stage name ("geometry"), a "?" placeholder in a log line, and 0x100
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
 # a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
-# 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'?'": 2, "'geometry'": 3, '0x100': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},
@@ -135,6 +134,16 @@ class Host(unittest.TestCase):
         assert m, 'Program.cs C2HandleWords line not found'
         self.assertEqual(int(m.group(1)), abi.C2_SEP_SLOTS)
         self.assertEqual(abi.C2_ROW, 8)
+
+    def test_translator_pool_table_agrees(self):   # GlobalToStorage.cs keeps its own copy of the raw global memory pool table's layout
+        src = (REPO / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs').read_text()
+        got = {name: int(v, 0) for name, v in re.findall(r'const int (Gmem\w+) = (\w+);', src)}
+        self.assertEqual(got, {'GmemMapCbSlot': abi.GMEM_MAP_CB_SLOT, 'GmemMapLog2Word': abi.GMEM_MAP_LOG2_WORD, 'GmemMapEntryWords': abi.GMEM_MAP_ENTRY // 4,
+                               'GmemHintShift': abi.GMEM_HINT_SHIFT, 'GmemLogCbOffset': abi.GMEM_LOG_CB_OFFSET})
+        self.assertNotIn('GmemMapLog2 =', src, 'the table size is the host\'s (entry 0), not a constant of the translator')
+        self.assertEqual(abi.GMEM_MAP_LOG2_WORD % 2, 0, 'the low word of entry 0\'s delta')
+        self.assertGreaterEqual(abi.GMEM_MAP_LOG2_WORD, 4)
+        self.assertLess(abi.GMEM_MAP_LOG2_WORD, 6, 'not the hint (word 6)')
 
 
 class Ratchet(unittest.TestCase):

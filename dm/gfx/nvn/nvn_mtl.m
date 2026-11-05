@@ -8181,51 +8181,62 @@ static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support
 // vertex shader writes {count 0, instances 1} into each indirect draw record whose address its storage buffer lists, every frame before the terrain's culling refills them; with the
 // stores dropped, the terrain's walls and floor were never drawn (instance count 0) and the counts grew frame after frame.
 // Layout (dmsh_abi.h DMSH_GMEM_MAP_*): sorted by start, entry 0 empty, then the pools as disjoint ranges (a pool overlapping an earlier one keeps only its part past that one's end: every
-// pool wraps the guest's own pages, so any pool holding an address gives its GPU address), unused entries starting at ~0. Rebuilt when the pools change; the replaced table goes through
-// deferred release, so submissions encoded with it keep it. Every pool is made resident, as the shader may reach any of them
+// pool wraps the guest's own pages, so any pool holding an address gives its GPU address), unused entries starting at ~0. 1 << log2 entries, log2 in entry 0 (DMSH_GMEM_MAP_LOG2_WORD):
+// as many as the ranges need, so every pool is in it (a fixed 4,096 left Ocarina of Time's pools past the 4,095th out, and its GPU hung right after). Rebuilt when the pools change;
+// the replaced table goes through deferred release, so submissions encoded with it keep it. Every pool is made resident, as the shader may reach any of them
 static id<MTLBuffer> g_gmem_buf; static uint64_t g_gmem_gen;
+static uint64_t *g_gmem_rng; static int g_gmem_cap;   // the ranges of the last build, {start, end, delta} each (under g_mu)
+static int gmem_log2(id<MTLBuffer> map) { return (int)((const uint32_t *)map.contents)[DMSH_GMEM_MAP_LOG2_WORD]; }
+static size_t gmem_log_bytes(id<MTLBuffer> map) { return ((size_t)1 << gmem_log2(map)) / 8; }   // the write log of that table: one bit an entry
 static id<MTLBuffer> gmem_map(void) {
     uint64_t gen = atomic_load(&g_pool_gen);
     if (g_gmem_buf && g_gmem_gen == gen) return g_gmem_buf;
-    id<MTLBuffer> b = [g_dev newBufferWithLength:DMSH_GMEM_MAP_ENTRIES * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
-    uint8_t *t = (uint8_t *)b.contents; memset(t, 0, b.length);
-    for (int k = 1; k < DMSH_GMEM_MAP_ENTRIES; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
-    int n = 1, over = 0; uint64_t end = 0;
+    int n = 1; uint64_t end = 0;
     pthread_mutex_lock(&g_mu);
     for (int k = 0; k < g_nbig; k++) if (!g_big[k].full) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
     gen = atomic_load(&g_pool_gen); pidx_sort();
+    if (g_gmem_cap < g_npool + 1) { g_gmem_cap = MAX(2 * g_gmem_cap, g_npool + 1); g_gmem_rng = realloc(g_gmem_rng, (size_t)g_gmem_cap * 3 * sizeof *g_gmem_rng); if (!g_gmem_rng) MDIE("raw global memory pool table"); }
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
         if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
-        if (n == DMSH_GMEM_MAP_ENTRIES) { over++; continue; }
-        uint64_t e[3] = {lo, hi, p->gpu - p->base}; memcpy(t + (size_t)n++ * DMSH_GMEM_MAP_ENTRY, e, sizeof e); end = hi;
+        uint64_t *e = g_gmem_rng + 3 * n++; e[0] = lo; e[1] = hi; e[2] = p->gpu - p->base; end = hi;
     }
     pthread_mutex_unlock(&g_mu);
-    // A hint can name a pool only if the entire chunk is inside its entry. Collisions replace the hint; the shader checks the chunk tag before using it.
+    static int log2_max = DMSH_GMEM_MAP_LOG2_MIN;   // the table never shrinks: its write logs keep their size
+    int log2 = log2_max; while ((1 << log2) < n) log2++;
+    if (log2 > log2_max) { MLOG("raw global memory: the pool table grows to %d entries for %d ranges", 1 << log2, n - 1); log2_max = log2; }
+    const int entries = 1 << log2; const uint32_t mask = (uint32_t)entries - 1;
+    id<MTLBuffer> b = [g_dev newBufferWithLength:(NSUInteger)entries * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
+    if (!b) MDIE("raw global memory: no buffer for a pool table of %d entries", entries);
+    uint8_t *t = (uint8_t *)b.contents; memset(t, 0, b.length);
+    for (int k = 1; k < entries; k++) memset(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, 0xff, 8);
+    for (int k = 1; k < n; k++) memcpy(t + (size_t)k * DMSH_GMEM_MAP_ENTRY, g_gmem_rng + 3 * k, 3 * sizeof *g_gmem_rng);
+    ((uint32_t *)t)[DMSH_GMEM_MAP_LOG2_WORD] = (uint32_t)log2;
+    // A hint can name a pool only if the entire chunk is inside its entry. It goes in the entry the chunk's low log2 bits index, with the chunk's other bits; collisions replace the
+    // hint, and the shader checks those bits before using it. Chunk numbers stop at 2^32 (addresses below 2^53), past which the shader searches
     for (int k = 1; k < n; k++) {
         const uint64_t *range = (const void *)(t + (size_t)k * DMSH_GMEM_MAP_ENTRY);
         const uint64_t chunk_size = 1ull << DMSH_GMEM_HINT_SHIFT;
         uint64_t first = range[0] / chunk_size + (range[0] % chunk_size != 0);
-        uint64_t last = MIN(range[1] / chunk_size, (UINT32_MAX + 1ull) / DMSH_GMEM_MAP_ENTRIES);
+        uint64_t last = MIN(MIN(range[1] / chunk_size, UINT32_MAX + 1ull), first + (uint64_t)entries);   // past that many, a range's chunks only replace its own hints
         for (uint64_t chunk = first; chunk < last; chunk++) {
-            size_t off = (chunk & (DMSH_GMEM_MAP_ENTRIES - 1)) * DMSH_GMEM_MAP_ENTRY + 6 * sizeof(uint32_t);
-            uint32_t hint = (uint32_t)(chunk * DMSH_GMEM_MAP_ENTRIES + (unsigned)k);
+            size_t off = ((uint32_t)chunk & mask) * DMSH_GMEM_MAP_ENTRY + 6 * sizeof(uint32_t);
+            uint32_t hint = ((uint32_t)chunk & ~mask) | (uint32_t)k;
             memcpy(t + off, &hint, sizeof hint);
         }
     }
-    if (over) RED_ONCE(140, "raw global memory: %d more memory pools than the %d entries of the pool table; addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
     res_add(b); res_commit();
     if (g_gmem_buf) defer_obj_release(g_gmem_buf);
     g_gmem_buf = b; g_gmem_gen = gen;
-    { static int said; if (!said++) MLOG("raw global memory: pool table of %d ranges (pool generation %llu), rebuilt whenever a pool comes or goes", n - 1, (unsigned long long)gen); }
+    { static int said; if (!said++) MLOG("raw global memory: pool table of %d ranges in %d entries (pool generation %llu), rebuilt whenever a pool comes or goes", n - 1, entries, (unsigned long long)gen); }
     return b;
 }
 // The bitmap records the table entries the GPU actually used. NDVE's full-frame writes overflowed the old page hash log even within one pool.
 // Until the learned set stays unchanged for two logs, the stores count as writes anywhere. Later misses add their ranges and check the shadows that used the prediction.
 // Restarting learning after each miss made subsequent geometry draws wait on the GPU (geo_cpu_hazard), giving Donkey Kong Bananza streaks of 400-2,000 ms frames.
-enum { GML_WORDS = DMSH_GMEM_MAP_ENTRIES / 32, GML_BYTES = GML_WORDS * sizeof(uint32_t), GML_MAX = 4096, GML_STABLE = 2 };
+enum { GML_MAX = 4096, GML_STABLE = 2 };
 static pthread_mutex_t g_gml_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_gml_lo[GML_MAX], g_gml_hi[GML_MAX];
 static int g_gml_n, g_gml_stable, g_gml_over;
@@ -8246,9 +8257,10 @@ static void gml_read(id<MTLBuffer> b, id<MTLBuffer> map, int predicted, uint64_t
         }
         pthread_mutex_unlock(&g_gsr_mu);
     }
+    const size_t words = gmem_log_bytes(map) / sizeof *w;
     pthread_mutex_lock(&g_gml_mu);
     g_gml_logs++;
-    for (unsigned i = 0; i < GML_WORDS; i++) for (uint32_t bits = w[i]; bits; bits &= bits - 1) {
+    for (size_t i = 0; i < words; i++) for (uint32_t bits = w[i]; bits; bits &= bits - 1) {
         unsigned entry = i * 32 + (unsigned)__builtin_ctz(bits);
         const uint64_t *range = ranges + entry * (DMSH_GMEM_MAP_ENTRY / sizeof *ranges);
         uint64_t lo = range[0], hi = range[1];
@@ -8280,14 +8292,18 @@ static void gml_read(id<MTLBuffer> b, id<MTLBuffer> map, int predicted, uint64_t
 static uint64_t gml_take(id<MTLBuffer> map) {
     pthread_mutex_lock(&g_gml_mu);
     if (!g_gml_free) g_gml_free = [NSMutableArray array];
+    const size_t bytes = gmem_log_bytes(map);
+    NSArray<id<MTLBuffer>> *stale = nil;   // the table grew: free logs of the old size go (those still in flight come back later and go then)
+    if (g_gml_free.count && g_gml_free.lastObject.length != bytes) { stale = [g_gml_free copy]; [g_gml_free removeAllObjects]; }
     id<MTLBuffer> b = g_gml_free.lastObject; if (b) [g_gml_free removeLastObject];
     int predicted = !g_gml_over && g_gml_stable >= GML_STABLE ? g_gml_n : -1;
     { static int said; if (predicted >= 0 && !said++) MLOG("raw global memory: the stores' writes are predicted from now on: %d pool(s) learned over %llu logs", predicted, (unsigned long long)g_gml_logs); }
     for (int i = 0; i < predicted; i++) sbw_note(g_gml_lo[i], g_gml_hi[i] - g_gml_lo[i], SBW_GPU);
     pthread_mutex_unlock(&g_gml_mu);
+    for (id<MTLBuffer> o in stale) res_remove(o);
     if (predicted < 0) sbw_note(0, 0, SBW_GPU);
-    if (!b) { b = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared]; res_add(b); res_commit(); }
-    memset(b.contents, 0, GML_BYTES);
+    if (!b) { b = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b); res_commit(); }
+    memset(b.contents, 0, bytes);
     g_gml_on = 1; uint64_t fence = g_fence + 1;
     [g_commit_blocks addObject:^{ gml_read(b, map, predicted, fence); }];
     return b.gpuAddress;

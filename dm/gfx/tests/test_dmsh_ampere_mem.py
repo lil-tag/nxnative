@@ -136,6 +136,37 @@ class Suatom(Translated):
         self.assertRegex(msl, r'uint \w+ = [^;]*atomic_fetch_add')
 
 
+class RawGlobalMemory(Translated):
+    # A load through a pointer the shader loaded from memory goes through the host's pool table (GlobalToStorage.TryGenerateRawStorageOp, dmsh_abi.h DMSH_GMEM_MAP_*). The table's size is the
+    # host's: a fixed 4,096 entries left Ocarina of Time's pools past the 4,095th out (4,118 pools, then a GPU hang; upstream issue #1326, 4,248 pools)
+    ULDC = (0x000fe20000000a00, 0x00c0040000047ab9)   # UR4 = c3[0x10]
+    MOV_R5 = (0x000fe20000000f00, 0x0100000000057a02)   # R5 = c4[0]
+    LDG64 = (0x000ea200081e8b00, 0x0000000405027981)   # LDG.E.64 R2, [R5 + UR4], write barrier 2: a pointer from the game's storage buffer
+    LDG_RAW = (0x004ea2000c1e0900, 0x0000000002067381)   # LDG.E R6, [R2.64] after waiting on it: an address loaded from memory
+    USE = (0x004ea200001ee000, 0x00000c06060c7593)   # SUATOM.ADD of R6 after waiting on it, so the load stays
+
+    def msl(self):
+        return self.translate(b''.join(inst(*c) for c in (self.MOV_R5, self.ULDC, self.LDG64, self.LDG_RAW, self.USE, EXIT)))
+
+    def raw_function(self, msl):
+        fn = re.search(r'\n\S[^\n]*\(([^\n]*)\)\n\{\n((?:(?!\n\}).)*reinterpret_cast<(?:const )?device uint\*>(?:(?!\n\}).)*)\n\}', msl, re.S)
+        self.assertIsNotNone(fn, 'no function loads through a raw pointer')
+        return fn.group(2)
+
+    def test_the_table_size_is_read_from_entry_0(self):
+        body = self.raw_function(self.msl())
+        log2 = re.search(r'int (_\d+) = 0 \+ 4;\s+float (_\d+) = as_type<float>\(\w+\._m0\[\1\]\);', body)
+        self.assertIsNotNone(log2, 'log2 of the entry count: word 4 of entry 0 (DMSH_GMEM_MAP_LOG2_WORD)')
+        self.assertIn(f'1 << as_type<int>({log2.group(2)})', body, 'the entry count from it')
+        self.assertNotIn('4095', body, 'no fixed index mask')
+        self.assertNotIn('2048', body, 'no fixed first step')
+
+    def test_the_search_is_a_loop_that_halves_its_step(self):
+        body = self.raw_function(self.msl())
+        self.assertRegex(body, r'for \(;;\)|while \(|do\s*\{', 'the search takes the table\'s log2 steps')
+        self.assertRegex(body, r'>> 1u?\b|>> uint\(1\)|/ 2', 'its step halves each time, so it ends whatever the table holds')
+
+
 class Bmsk(Translated):
     """BMSK (Star Fox's 58046f286de779e1 +0x5a0, on registers the atomic reads): a mask of b bits from bit a. The form with c[4] sources keeps it from folding"""
     MOVS = inst(0x000fe20000000f00, 0x0100000000037a02) + inst(0x000fe20000000f00, 0x0100010000047a02)   # R3 = c4[0], R4 = c4[4]

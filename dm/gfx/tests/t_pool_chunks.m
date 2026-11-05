@@ -21,6 +21,17 @@ static id<MTLBuffer> look(uint64_t a, uint64_t n) {
     void *cb = NULL; uint64_t co = 0; CHECK("the CPU lookup agrees", mtl_addr(a, n, &cb, &co) && (uint64_t)(uintptr_t)((__bridge id<MTLBuffer>)cb).contents + co == a);
     return b;
 }
+// The entry the shader's lookup takes for an address, 0 for none: the chunk's hint when it names an entry for that chunk, else the last entry starting at or below the address
+// (log2 halving steps, entry 0 starting at 0), and the address must lie before that entry's end
+static unsigned gmem_find(id<MTLBuffer> map, uint64_t a) {
+    const uint32_t *w = map.contents; const uint64_t *q = map.contents; const int e64 = DMSH_GMEM_MAP_ENTRY / sizeof(uint64_t);
+    int log2 = (int)w[DMSH_GMEM_MAP_LOG2_WORD]; uint32_t mask = (1u << log2) - 1, chunk = (uint32_t)(a >> DMSH_GMEM_HINT_SHIFT);
+    uint32_t hint = w[(chunk & mask) * (DMSH_GMEM_MAP_ENTRY / sizeof(uint32_t)) + 6];
+    unsigned sel;
+    if ((hint & mask) && (hint & ~mask) == (chunk & ~mask) && (a >> 32) < (1u << DMSH_GMEM_HINT_SHIFT)) sel = hint & mask;
+    else { unsigned i = 0, step = (1u << log2) >> 1; do { if (q[(i + step) * e64] <= a) i += step; step >>= 1; } while (step); sel = i; }
+    return a < q[sel * e64 + 1] ? sel : 0;
+}
 int main(void) { @autoreleasepool {
     mtl_init();
     const uint64_t GB = 1ull << 30, MB = 1ull << 20;
@@ -77,11 +88,14 @@ int main(void) { @autoreleasepool {
     mtl_sub_begin(); id<MTLBuffer> old_map = gmem_map(); CHECK("pool table made", old_map != nil); finish();
     const uint64_t *ranges = old_map.contents;
     uint64_t chunk = (base + 900 * MB) >> DMSH_GMEM_HINT_SHIFT;
-    size_t hint_word = (chunk % DMSH_GMEM_MAP_ENTRIES) * (DMSH_GMEM_MAP_ENTRY / sizeof(uint32_t)) + 6;
+    const uint32_t mask = (1u << gmem_log2(old_map)) - 1;
+    CHECK("the table has at least the smallest size", gmem_log2(old_map) >= DMSH_GMEM_MAP_LOG2_MIN);
+    size_t hint_word = (chunk & mask) * (DMSH_GMEM_MAP_ENTRY / sizeof(uint32_t)) + 6;
     uint32_t hint = ((const uint32_t *)old_map.contents)[hint_word];
-    unsigned entry = hint % DMSH_GMEM_MAP_ENTRIES;
+    unsigned entry = hint & mask;
     const uint64_t *range = ranges + entry * (DMSH_GMEM_MAP_ENTRY / sizeof *ranges);
-    CHECK("the hint names its chunk and pool", entry && hint / DMSH_GMEM_MAP_ENTRIES == chunk);
+    CHECK("the hint names its chunk and pool", entry && (hint & ~mask) == ((uint32_t)chunk & ~mask));
+    CHECK("the shader finds the address in that pool", gmem_find(old_map, base + 900 * MB) == entry);
     CHECK("the entire hinted chunk lies within its pool range", range[0] <= chunk << DMSH_GMEM_HINT_SHIFT && range[1] >= (chunk + 1) << DMSH_GMEM_HINT_SHIFT);
     CHECK("the whole pool has an entry", g_big[0].full > 0 && g_pools[g_big[0].full - 1].end == base + GB);
     CHECK("lookups take it", look(base + 900 * MB, 4096).length == GB);
@@ -95,11 +109,33 @@ int main(void) { @autoreleasepool {
     CHECK("the small pool still answers, its entry moved", look((uint64_t)(uintptr_t)small + 20, 16).length == 64 * MB);
     CHECK("the large pool's addresses do not", !mtl_gpu_addr(base + 100, 4, &mb, &mo, &gpu));
     mtl_sub_begin(); id<MTLBuffer> new_map = gmem_map(); CHECK("pool table rebuilt", new_map && new_map != old_map); finish();
-    id<MTLBuffer> log = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
-    memset(log.contents, 0, GML_BYTES);
+    id<MTLBuffer> log = [g_dev newBufferWithLength:gmem_log_bytes(old_map) options:MTLResourceStorageModeShared];
+    memset(log.contents, 0, log.length);
     ((uint32_t *)log.contents)[entry / 32] = 1u << (entry % 32);
     gml_read(log, old_map, -1, 0);
     CHECK("a completed bitmap resolves its entry in the original map", g_gml_n == 1 && g_gml_lo[0] == range[0] && g_gml_hi[0] == range[1]);
     mtl_pool_del(small); mtl_drain();
+    // More pools than the smallest table has entries (Ocarina of Time: 4,118 against 4,095, and the GPU hung right after): the table grows, and every pool is found, by its hint
+    // or by the search, as the shader looks (GlobalToStorage.TryGenerateRawStorageOp)
+    enum { MANY = 5000 }; const uint64_t PS = 64 * 1024;
+    uint8_t *many = mmap(NULL, MANY * 2 * PS, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (many == MAP_FAILED) abort();
+    for (int i = 0; i < MANY; i++) mtl_pool_add(many + 2 * PS * i, PS);   // a gap after each: no two ranges merge
+    mtl_sub_begin(); id<MTLBuffer> grown = gmem_map(); finish();
+    CHECK("the table grew past its smallest size", gmem_log2(grown) > DMSH_GMEM_MAP_LOG2_MIN && (1 << gmem_log2(grown)) > MANY);
+    CHECK("its length is its entries", grown.length == ((size_t)1 << gmem_log2(grown)) * DMSH_GMEM_MAP_ENTRY);
+    CHECK("its write log has a bit for every entry", gmem_log_bytes(grown) * 8 == (size_t)1 << gmem_log2(grown));
+    int found = 0, gaps = 0;
+    for (int i = 0; i < MANY; i++) {
+        uint64_t a = (uint64_t)(uintptr_t)(many + 2 * PS * i);
+        unsigned e = gmem_find(grown, a + PS / 2);
+        const uint64_t *r = (const uint64_t *)grown.contents + e * (DMSH_GMEM_MAP_ENTRY / sizeof(uint64_t));
+        found += e && r[0] <= a && a + PS <= r[1];
+        gaps += !gmem_find(grown, a + PS + PS / 2);
+    }
+    CHECK("every pool is found", found == MANY);
+    CHECK("an address between pools is in none", gaps == MANY);
+    CHECK("an address past every pool is in none", !gmem_find(grown, 0x7fffffffffffull));
+    for (int i = 0; i < MANY; i++) mtl_pool_del(many + 2 * PS * i);
+    mtl_drain();
     printf("t_pool_chunks: %d checks, %d failed\n", checks, failed); return failed != 0;
 }}

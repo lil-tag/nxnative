@@ -780,10 +780,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         }
 
         // nxnative: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
-        // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
-        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
+        // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << log2 entries of GmemMapEntryWords words each,
+        // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0. The host sizes the
+        // table to its pools and writes log2 into word GmemMapLog2Word of entry 0 (its delta, which no lookup uses): a fixed 4,096 entries was too few for Ocarina of Time, whose
+        // pools past the 4,095th were left out of the table
         public const int GmemMapCbSlot = 0xff;
-        private const int GmemMapLog2 = 12;
+        private const int GmemMapLog2Word = 4;
         private const int GmemMapEntryWords = 8;
         private const int GmemHintShift = 21;
 
@@ -847,34 +849,43 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
             }
 
-            // The host's tagged hint covers a whole chunk inside one entry. NDVE repeatedly accesses the same large pools from adjacent lanes.
+            Operand log2 = MapWord(Const(0), GmemMapLog2Word);
+            Operand indexMask = context.ISubtract(context.ShiftLeft(Const(1), log2), Const(1));
+            Operand highMask = context.BitwiseNot(indexMask);
+
+            // The host's tagged hint covers a whole chunk inside one entry. NDVE repeatedly accesses the same large pools from adjacent lanes. The hint for a chunk is in the entry its low
+            // log2 bits index and holds the chunk's other bits; an address of 2^53 or more has no exact chunk number and takes the search
             Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
-            Operand indexMask = Const((1 << GmemMapLog2) - 1);
             Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
             Operand hintIndex = context.BitwiseAnd(hint, indexMask);
-            Operand hintFits = context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk));
-            hintFits = context.BitwiseAnd(hintFits, context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+            Operand hintFits = context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.BitwiseAnd(hint, highMask), context.BitwiseAnd(chunk, highMask)));
+            hintFits = context.BitwiseAnd(hintFits, context.ICompareLessUnsigned(addrHigh, Const(1 << GmemHintShift)));
             Operand selected = Local();
             Operand lblFound = Label();
             context.Copy(selected, hintIndex);
             context.BranchIfTrue(lblFound, hintFits);
 
-            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one).
-            Operand index = Const(0);
+            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one): log2 steps, the first half the table. The step halves every time,
+            // so the search ends whatever the table holds
+            Operand index = Local();
+            Operand step = Local();
+            Operand lblSearch = Label();
+            context.Copy(index, Const(0));
+            context.Copy(step, context.ShiftRightU32(context.ShiftLeft(Const(1), log2), Const(1)));
+            context.MarkLabel(lblSearch);
 
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
-            {
-                Operand candidate = context.IAdd(index, Const(step));
-                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
-                Operand startLow = MapWord(entry, 0);
-                Operand startHigh = MapWord(entry, 1);
+            Operand candidate = context.IAdd(index, step);
+            Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
+            Operand startLow = MapWord(entry, 0);
+            Operand startHigh = MapWord(entry, 1);
 
-                Operand atOrBelow = context.BitwiseOr(
-                    context.ICompareLessUnsigned(startHigh, addrHigh),
-                    context.BitwiseAnd(context.ICompareEqual(startHigh, addrHigh), context.ICompareLessOrEqualUnsigned(startLow, addrLow)));
+            Operand atOrBelow = context.BitwiseOr(
+                context.ICompareLessUnsigned(startHigh, addrHigh),
+                context.BitwiseAnd(context.ICompareEqual(startHigh, addrHigh), context.ICompareLessOrEqualUnsigned(startLow, addrLow)));
 
-                index = context.ConditionalSelect(atOrBelow, candidate, index);
-            }
+            context.Copy(index, context.ConditionalSelect(atOrBelow, candidate, index));
+            context.Copy(step, context.ShiftRightU32(step, Const(1)));
+            context.BranchIfTrue(lblSearch, context.ICompareNotEqual(step, Const(0)));
 
             context.Copy(selected, index);
             context.MarkLabel(lblFound);
