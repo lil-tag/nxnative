@@ -485,6 +485,35 @@ static void fps_show(BOOL on) {
 - (void)toggle:(NSMenuItem *)i { fps_show(!g_fps); i.state = g_fps ? NSControlStateValueOn : NSControlStateValueOff; }
 @end
 
+// The game paused out of focus. A game that asks for focus notifications (focus handling mode 1 or 2, hle_oe.c) can pause itself on OutOfFocus, as on a Switch whose HOME menu opens;
+// here that is its window resigning key. Ocarina of Time does, and its first launch "hung" before its first picture: the player looked elsewhere while the progress screen compiled
+// pipelines for 72 s, so the game, out of focus, paused before presenting anything, and the window stayed black with every guest thread waiting until it was clicked. Out of focus, a
+// window that has put nothing on screen for a second (the progress screen aside) says the game is paused and how to go on, and the log says so; the notice goes when the window is key
+// again. The Dock icon also bounces once when the prepare step ends while the app is not active (front_progress)
+int dm_focus_now(void);
+static NSTextField *g_pause; static NSTimer *g_pause_timer; static NSView *g_prog;
+static void pause_watch(BOOL out_of_focus) {
+    [g_pause_timer invalidate]; g_pause_timer = nil;
+    if (!out_of_focus) { if (g_pause) { [g_pause removeFromSuperview]; g_pause = nil; LOG("front end: window in front, the game goes on (pause notice removed)"); } return; }
+    __block uint64_t n0 = mtl_present_count();
+    g_pause_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        uint64_t n = mtl_present_count();
+        if (n != n0 || g_prog) { n0 = n; return; }   // still presenting out of focus (the game runs on), or the prepare step's progress screen is up
+        [t invalidate]; if (g_pause_timer == t) g_pause_timer = nil;
+        if (g_pause || dm_focus_now() == 1 || !g_win) return;
+        NSView *cv = g_win.contentView;
+        NSTextField *l = g_pause = [NSTextField labelWithString:@"Paused while this window is not in front\nClick it to continue"];
+        l.alignment = NSTextAlignmentCenter; l.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold]; l.textColor = NSColor.whiteColor;
+        l.drawsBackground = YES; l.backgroundColor = [NSColor colorWithWhite:0 alpha:0.6]; l.wantsLayer = YES; l.layer.cornerRadius = 8; l.layer.masksToBounds = YES;
+        [l sizeToFit]; NSSize z = l.frame.size; z.width += 32; z.height += 16;
+        l.frame = NSMakeRect(floor((cv.bounds.size.width - z.width) / 2), floor((cv.bounds.size.height - z.height) / 2), z.width, z.height);
+        l.autoresizingMask = NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin;
+        [cv addSubview:l];
+        LOG("front end: no frame for 1 s out of focus (%s): the game pauses itself until its window is in front, and the window says so (DM_FOCUS_KEEP=1 keeps it in focus)",
+            n ? "it had presented before" : "before its first frame");
+    }];
+}
+
 // AppKit reports a refused fullscreen request only to the window delegate (there is no notification for it)
 static void (^g_fs_failed)(void);
 @interface DmWinDelegate : NSObject <NSWindowDelegate> @end
@@ -1460,8 +1489,8 @@ void front_run(void (*guest)(void)) {
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) { dm_focus_set(2); pause_watch(YES); } }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); pause_watch(NO); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
@@ -1474,7 +1503,7 @@ void front_run(void (*guest)(void)) {
 }
 
 // Progress screen of the prepare step (front.h front_progress): a dark view over the game's, the title, a bar and a count, centered; AppKit views, so it draws while the game's thread waits
-static NSView *g_prog; static NSTextField *g_prog_title, *g_prog_count; static NSProgressIndicator *g_prog_bar;
+static NSTextField *g_prog_title, *g_prog_count; static NSProgressIndicator *g_prog_bar;
 static NSTextField *prog_label(NSRect r, CGFloat size, NSFontWeight w, NSColor *c) {
     NSTextField *t = [NSTextField labelWithString:@""]; t.frame = r; t.alignment = NSTextAlignmentCenter; t.textColor = c;
     t.font = [NSFont monospacedDigitSystemFontOfSize:size weight:w]; return t;
@@ -1486,7 +1515,11 @@ void front_progress(const char *title, long done, long total) {
     void (*hook)(const char *, long, long) = front_progress_hook;
     if (hook) { dispatch_async(dispatch_get_main_queue(), ^{ hook(tt.UTF8String, done, total); }); return; }   // the host app draws it (front.h)
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!tt) { [g_prog removeFromSuperview]; g_prog = nil; return; }
+        if (!tt) {
+            [g_prog removeFromSuperview]; g_prog = nil;
+            if (!NSApp.isActive) { [NSApp requestUserAttention:NSInformationalRequest]; LOG("front end: prepare step done while the app is not active: the Dock icon bounces"); }
+            return;
+        }
         if (!g_prog) {
             NSView *cv = g_win.contentView;
             g_prog = [[NSView alloc] initWithFrame:cv.bounds]; g_prog.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;

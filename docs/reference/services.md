@@ -610,6 +610,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md) (one of two causes of the freeze; the other is [Guest clock reads wait while the app is in the background](#guest-clock-reads-wait-while-the-app-is-in-the-background)).
 - **Note:** modes seen: 1 Monster Hunter Rise; 2 Wonder, Breath of the Wild, Tears of the Kingdom, Link's Awakening, Cuphead; 3 Galaxy, Galaxy 2, 3D World, Odyssey.
 
+### A game paused out of focus looks hung before its first picture
+
+- **Symptom:** on the Mac the window stays black after the progress screen, every guest thread waits (`sample`: `svc_dispatch` → `block`; a `DM_HITCH_DUMP` shows the main thread in `h_oe_PopMsg`), the process is near idle and the audio renders silence, with no `[RED]` line. Clicking the window starts the game.
+- **Cause:** not a hang. The game set focus handling mode 2 and pauses itself on message 15 with OutOfFocus, as on a Switch whose HOME menu opens, and the Mac front end reports the window resigning key as out of focus. The player looked elsewhere while the progress screen compiled pipelines (72 s on a cold Metal cache), so the log has `oe focus state → 2` before the first frame and the first `[longframe]` line only after `→ 1`. The window had nothing on it to say so.
+- **Fix:** `front_mac.m` (`pause_watch`): out of focus, a window that has presented nothing for a second (the progress screen aside) shows "Paused while this window is not in front / Click it to continue" and logs `front end: no frame for 1 s out of focus (…): the game pauses itself until its window is in front`; the notice goes when the window is key again (`window in front, the game goes on`). When the prepare step ends while the app is not active, the Dock icon bounces once. `DM_FOCUS_KEEP=1` keeps the game in focus whichever app is active.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Switch 2, its first launch with shader libraries; reproduced by activating another app during the title movie: the game stopped presenting within a second and went on at `→ 1`).
+
 ### Album calls fail with no album
 
 - **Symptom:** abort in `sm::Initialize` under `capsrv::InitializeForApplication` (`album::Initialize`); calls that reach the album service, found in the imports before they were met.

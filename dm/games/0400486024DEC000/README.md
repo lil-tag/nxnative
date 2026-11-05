@@ -40,6 +40,7 @@ For a run past the opening, copy the committed save folder to the new run's `DM_
 - In Kokiri Forest the foliage moved frantically. Six foliage compute shaders (`FoliageShader.sharcb`, `13002657609092b4` and five others) stopped at Ampere opcode `0x3a9`, [ATOMG.CAS](../../../docs/reference/shaders.md#atomgcas-a-global-compare-and-swap), and were left out; they translate now. Whether they were the frantic foliage is checked in the next run (open).
 - Two agl_technique_pfx compute shaders (`1f78730053feb036`, `e172bd7ec218ab8e`) did not compile: [blocks nested past clang's bracket depth](../../../docs/reference/shaders.md#blocks-nested-past-clangs-bracket-depth), 257 levels from an unrolled 256-element walk (resolved by the compile flag; the nesting itself is open).
 - 34 shaders dropped their [float atomic adds](../../../docs/reference/shaders.md#a-float-atomic-add-redf32ftzrn) (`RED.F32.FTZ.RN`, `Invalid reduction type: F32FtzRn`); they are a compare-and-swap loop now (resolved in the translator; what they draw is checked in the next run).
+- The first launch with shader libraries [looked hung before its first picture](../../../docs/reference/services.md#a-game-paused-out-of-focus-looks-hung-before-its-first-picture): the window had lost key status while the progress screen compiled the 11 NDVE pipelines (72 s on a cold Metal cache), and the game, in focus handling mode 2, pauses out of focus. It went on at `oe focus state → 1` (resolved: the Mac window now says the game is paused).
 
 ## Open
 
