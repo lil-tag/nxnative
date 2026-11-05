@@ -1145,6 +1145,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** The Legend of Zelda: Ocarina of Time (`0400486024DEC000`, no profile yet): 28 F2IPs to the nearest in 10 compute shaders that convert a picture into BT.709 Y and CbCr bytes (`99951da6e5cd38f5`, `aaa785ced92a88ef` and eight larger ones), and 14 truncating ones of a colour channel times 255 in 8 foliage mesh shaders (`740e2b04db624fb1` and seven others, `Foliage.Product.110`). With both, 42,850 of its 42,851 shaders translate; the one left (`68bbe98b3bfd9876`, agl_common) has data in place of code, as in [Splatoon Raiders](../../dm/games/0400380020056000/README.md).
 - **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_alu.py` (`F2ip`: the game's encoding on live registers, the byte order and the encodings refused; `F2ipTruncate`: the mesh shaders' encoding and the other rounding modes; `UimadImmediateC`: UIMAD with its immediate in C, another of the game's forms).
 
+### ATOMG.CAS: a global compare-and-swap
+
+- **Symptom:** `Ampere instruction 3a9 at 0x… is not implemented` in the shader build; the compute shader is left out and its dispatches skipped.
+- **Cause:** sm_86's ATOMG.CAS (register form 0x3a9; the decoder had the uniform form 0x9a9 only as a store) had no emitter. Its fields: Rd the old word, Ra the address (a pair with bit 72), Rb the value compared, Rc (64..72) the value written where the word equals Rb, the size at 73..76 (0 = 32 bits), the predicate at 81..84 that takes whether it swapped (PT where met).
+- **Fix:** `AAtomgCas` in `InstEmitAmpereMem.cs`: a 32-bit global compare-and-swap whose old word goes to Rd and whose comparison goes to the predicate; the global-to-storage pass turns it into a storage buffer one (or a raw pool table one). Other sizes and the uniform form stop the shader.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): six compute shaders of `FoliageShader.sharcb` (`13002657609092b4` and five others) claim a hash slot with `CAS(slot, 0, index + 1)` and take the old value's index when the slot was taken (0x8c00 in `13002657609092b4`). All six translate now.
+- **Check:** `DMSH_TEST_XLATE=<translator> python3 dm/gfx/tests/test_dmsh_ampere_mem.py` (`AtomgCas`).
+
 ### Comparisons with .FTZ
 
 - **Symptom:** single bright dots at thin far geometry (railings, track edges), changing frame to frame as the camera moves, already in the lit picture before anti-aliasing. Most of them come from another cause (below).
