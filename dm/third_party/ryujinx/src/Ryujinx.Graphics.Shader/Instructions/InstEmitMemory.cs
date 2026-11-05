@@ -218,6 +218,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     {
                         res = context.AtomicAdd(storageKind, e0, e1, value);
                     }
+                    else if (type == AtomSize.F32FtzRn)
+                    {
+                        res = EmitAtomicAddF32FtzRn(context, storageKind, e0, e1, value);
+                    }
                     else
                     {
                         context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");
@@ -304,6 +308,27 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             return res;
+        }
+
+        // nxnative: ADD.F32.FTZ.RN (RED and ATOM): the IR has no float atomic, so a compare-and-swap loop on the word: load it, add with denormal operands and result flushed to zero and
+        // the sum rounded to the nearest, and store it only where the word is still the one loaded; else again from a new load. Each value is defined once in the loop, which carries
+        // none, so the loop needs no phi; the loads and the compare-and-swap go through the global-to-storage pass as other accesses do. Returns the word before the add. Ocarina of
+        // Time: 34 shaders' RED.E.ADD.F32.FTZ.RN were dropped ("Invalid reduction type: F32FtzRn")
+        private static Operand EmitAtomicAddF32FtzRn(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value)
+        {
+            Operand addend = InstEmitAluHelper.FlushDenormal(context, value);
+            Operand lblLoop = Label();
+
+            context.MarkLabel(lblLoop);
+
+            Operand oldValue = context.Load(storageKind, e0, e1);
+            Operand sum = context.FPAdd(InstEmitAluHelper.FlushDenormal(context, oldValue), addend);
+            Operand newValue = InstEmitAluHelper.FlushDenormal(context, sum);
+            Operand casResult = context.AtomicCompareAndSwap(storageKind, e0, e1, oldValue, newValue);
+
+            context.BranchIfTrue(lblLoop, context.ICompareNotEqual(casResult, oldValue));
+
+            return oldValue;
         }
 
         private static void EmitLoad(

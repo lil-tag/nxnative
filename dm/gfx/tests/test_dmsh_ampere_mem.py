@@ -186,6 +186,31 @@ class AtomgCas(Translated):
         self.assertIn('ATOMG.CAS size U64', r.stdout + r.stderr)
 
 
+class RedF32(Translated):
+    # RED.E.ADD.F32.FTZ.RN [R2.64], R5 (0x98e, type 3 at 73..76, operation 0 at 87..90): Ocarina of Time has it in 34 shaders, which dropped it ("Invalid reduction type: F32FtzRn")
+    MOVS = [(0x000fe20000000f00, 0x0100000000027a02), (0x000fe20000000f00, 0x0100010000037a02), (0x000fe20000000f00, 0x0100020000057a02)]   # R2 = c4[0], R3 = c4[4], R5 = c4[8]
+    RED = (0x000fe2000c00063f, 0x000000050200798e)
+
+    def red_msl(self, red):
+        with tempfile.TemporaryDirectory(prefix='red_f32_') as d:
+            (Path(d) / 'k.bin').write_bytes(b''.join(inst(*c) for c in (*self.MOVS, red, EXIT)))
+            (Path(d) / 'jobs.json').write_text(json.dumps([dict(key='k', stage='cs', arch='sm86', code=str(Path(d) / 'k.bin'), tex={}, img={}, attr={}, fout={}, local=[32, 1, 1], nvn2_cs=[0, 0, 3, 0x40, 0])]))
+            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(Path(d) / 'jobs.json'), d], capture_output=True, text=True)
+            notes = (Path(d) / 'k.res.json').read_text() if (Path(d) / 'k.res.json').exists() else ''
+        return r.stdout + r.stderr + notes, self.translate(b''.join(inst(*c) for c in (*self.MOVS, red, EXIT)))
+
+    def test_an_add_by_compare_and_swap(self):
+        log, msl = self.red_msl(self.RED)
+        self.assertNotIn('Invalid reduction type', log)
+        self.assertIn('atomic_compare_exchange', msl)
+        self.assertRegex(msl, r'do\s*\{|for \(;;\)|while \(', 'again from a new load where another thread changed the word')
+        self.assertRegex(msl, r'1\.1754943\d*e-38', 'denormals flushed (FTZ)')
+
+    def test_f16x2_is_still_dropped(self):   # type 4: not implemented, reported
+        log, _ = self.red_msl(((self.RED[0] & ~(7 << 9)) | 4 << 9, self.RED[1]))
+        self.assertIn('Invalid reduction type: F16x2FtzRn', log)
+
+
 class Bmsk(Translated):
     """BMSK (Star Fox's 58046f286de779e1 +0x5a0, on registers the atomic reads): a mask of b bits from bit a. The form with c[4] sources keeps it from folding"""
     MOVS = inst(0x000fe20000000f00, 0x0100000000037a02) + inst(0x000fe20000000f00, 0x0100010000047a02)   # R3 = c4[0], R4 = c4[4]
