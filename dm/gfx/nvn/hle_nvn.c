@@ -387,7 +387,9 @@ static void ft_add(const tex_t *t) {
     // COMPRESSIBLE is a memory-compression hint, not a data format: a game that sets it on every texture it creates (SD GUNDAM G GENERATION CROSS RAYS,
     // SDK 9.4.1) still writes plain texels, so those textures must be registered too or the CPU writes that follow stay invisible (its tutorial overlay's
     // background never appeared). A CPU_NO_ACCESS pool keeps the exclusion: there the compression tags may really be there.
-    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+    // A sparse pool's addresses are no memory the CPU writes or flushes, and no range nvn_dirty tracks, so they read as dirty at once: every texture in one, a render target too, came out CPU-written at its first
+    // use in a profile with tex_dirty_upload (upstream 6121fd75). What the CPU wrote into the physical pages behind one is seen through the page table instead
+    if (!DM_GAME_TEX_FLUSH_UPLOAD || !t->mem || !t->pool || t->pool->vp || t->has_layout || t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
         (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return;
     pthread_mutex_lock(&g_ft_mu);
     if (g_nft == g_cft && !(g_ft = realloc(g_ft, (g_cft = g_cft ? 2 * g_cft : 1024) * sizeof *g_ft))) die("flush_tex allocation failed");
@@ -1022,8 +1024,8 @@ NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NV
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
-    for (int i = 0; i < n; i++) if (r->color[i]) mtl_pool_gpu_written(r->color[i]->pool);
-    if (r->depth) mtl_pool_gpu_written(r->depth->pool);
+    for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]->pool, r->color[i]->mem, r->color[i]->L.size);
+    if (r->depth) mtl_tex_gpu_written(r->depth->pool, r->depth->mem, r->depth->L.size);
 }
 NVN(nvnCommandBufferClearColor, void, NVNcommandBuffer *c, int index, const float *rgba, int mask) {
     p_clear_color *r = REC(c, OP_CLEAR_COLOR, p_clear_color); r->index = index; r->mask = mask; memcpy(r->rgba, rgba, 16);
@@ -1163,7 +1165,7 @@ NVN(nvnCommandBufferSetSamplerPool, void, NVNcommandBuffer *c, const NVNsamplerP
 NVN(nvnCommandBufferCopyBufferToTexture, void, NVNcommandBuffer *c, NVNbufferAddress src, const NVNtexture *t, const NVNtextureView *v,
     const NVNcopyRegion *r, int flags) {
     p_copy_b2t *o = REC_SNAP(c, OP_COPY_B2T, p_copy_b2t, 1); o->src = src; o->tex = tex_snap(o, SNAP_OFF(p_copy_b2t), 0, t, (uint64_t)__builtin_return_address(0)); copy_view(&o->view, &o->has_view, v); o->r = *r; o->flags = flags;
-    if (o->tex) mtl_pool_gpu_written(o->tex->pool);
+    if (o->tex) mtl_tex_gpu_written(o->tex->pool, o->tex->mem, o->tex->L.size);
 }
 NVN(nvnCommandBufferCopyTextureToBuffer, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r,
     NVNbufferAddress dst, int flags) {
@@ -1171,16 +1173,16 @@ NVN(nvnCommandBufferCopyTextureToBuffer, void, NVNcommandBuffer *c, const NVNtex
 }
 // Clear a texture region with the given value (float / unsigned integer versions; mask = channel write mask)
 NVN(nvnCommandBufferClearTexture, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const float *rgba, int mask) {
-    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_pool_gpu_written(o->tex->pool); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 0; memcpy(o->c.f, rgba, 16);
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_tex_gpu_written(o->tex->pool, o->tex->mem, o->tex->L.size); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 0; memcpy(o->c.f, rgba, 16);
 }
 NVN(nvnCommandBufferClearTextureui, void, NVNcommandBuffer *c, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const uint32_t *rgba, int mask) {
-    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_pool_gpu_written(o->tex->pool); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
+    p_clear_tex *o = REC_SNAP(c, OP_CLEAR_TEX, p_clear_tex, 1); o->tex = tex_snap(o, SNAP_OFF(p_clear_tex), 0, t, (uint64_t)__builtin_return_address(0)); if (o->tex) mtl_tex_gpu_written(o->tex->pool, o->tex->mem, o->tex->L.size); copy_view(&o->view, &o->has_view, v); o->r = *r; o->mask = mask; o->is_uint = 1; memcpy(o->c.u, rgba, 16);
 }
 NVN(nvnCommandBufferCopyTextureToTexture, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNcopyRegion *sr,
     const NVNtexture *d, const NVNtextureView *dv, const NVNcopyRegion *dr, int flags) {
     p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2); o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, (uint64_t)__builtin_return_address(0)); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, (uint64_t)__builtin_return_address(0));
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv); o->sr = *sr; o->dr = *dr; o->flags = flags;
-    if (o->dst) mtl_pool_gpu_written(o->dst->pool);
+    if (o->dst) mtl_tex_gpu_written(o->dst->pool, o->dst->mem, o->dst->L.size);
 }
 // A textured rectangle into the bound colour targets, replayed as draw_tex (nvn_mtl.m). The handle's IDs are moved to the pools this command buffer bound, as bind_handles does:
 // Streets of Rage 4 draws its movie frames into its scene target this way, from a second texture pool. Only the handle's lower 32 bits reach the GPU (bind_handles)
@@ -2142,21 +2144,22 @@ NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) 
 }
 NVN(nvnBufferFinalize, void, NVNbuffer *buf) { ((buf_t *)buf)->magic = 0; }
 NVN(nvnBufferSetDebugLabel, void, NVNbuffer *buf, const char *s) { (void)buf; (void)s; }
-NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off); }
+// The game can pass a buffer whose BufferInitialize failed, or a null pool, while it streams a big area in (upstream #1445: a crash entering Hyrule Field). These answer as empty instead of reading through null (upstream #1444)
+NVN(nvnBufferGetAddress, NVNbufferAddress, const NVNbuffer *buf) { return buf && BF(buf)->pool ? (NVNbufferAddress)(BF(buf)->pool->mem + BF(buf)->off) : 0; }
 // A buffer or pool the CPU has no access to (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) maps to NULL, as in NVN, though the host's storage is CPU memory: EA SPORTS FC 27's Frostbite
 // renderer takes a buffer's GPU address as GetAddress + (its data pointer − Map), with a null data pointer for such a buffer (OpcodeCopySubresource), so a real pointer made the
 // copy's destination address 0 (FATAL buffer copy address is in no memory pool)
-NVN(nvnBufferMap, void *, const NVNbuffer *buf) { return BF(buf)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? NULL : BF(buf)->pool->mem + BF(buf)->off; }
-NVN(nvnBufferGetSize, size_t, const NVNbuffer *buf) { return (size_t)BF(buf)->size; }
-NVN(nvnBufferGetMemoryPool, NVNmemoryPool *, const NVNbuffer *buf) { return (NVNmemoryPool *)BF(buf)->pool; }
-NVN(nvnBufferGetMemoryOffset, ptrdiff_t, const NVNbuffer *buf) { return (ptrdiff_t)BF(buf)->off; }
+NVN(nvnBufferMap, void *, const NVNbuffer *buf) { return !buf || !BF(buf)->pool || (BF(buf)->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ? NULL : BF(buf)->pool->mem + BF(buf)->off; }
+NVN(nvnBufferGetSize, size_t, const NVNbuffer *buf) { return buf ? (size_t)BF(buf)->size : 0; }
+NVN(nvnBufferGetMemoryPool, NVNmemoryPool *, const NVNbuffer *buf) { return buf ? (NVNmemoryPool *)BF(buf)->pool : NULL; }
+NVN(nvnBufferGetMemoryOffset, ptrdiff_t, const NVNbuffer *buf) { return buf ? (ptrdiff_t)BF(buf)->off : 0; }
 NVN(nvnBufferFlushMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, size_t n) { (void)buf; (void)off; (void)n; }        // unified memory: nothing to flush
 NVN(nvnBufferInvalidateMappedRange, void, const NVNbuffer *buf, ptrdiff_t off, size_t n) { (void)buf; (void)off; (void)n; }
 
 // Memory pool queries
-NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return (NVNmemoryPoolFlags)((const pool_t *)p)->flags; }
-NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return ((const pool_t *)p)->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS ? NULL : ((const pool_t *)p)->mem; }   // NULL without CPU access (nvnBufferMap)
-NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { return (size_t)((const pool_t *)p)->size; }
+NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return p ? (NVNmemoryPoolFlags)((const pool_t *)p)->flags : 0; }
+NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return !p || (((const pool_t *)p)->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ? NULL : ((const pool_t *)p)->mem; }   // NULL without CPU access (nvnBufferMap)
+NVN(nvnMemoryPoolGetSize, size_t, const NVNmemoryPool *p) { return p ? (size_t)((const pool_t *)p)->size : 0; }
 NVN(nvnMemoryPoolInvalidateMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolSetDebugLabel, void, NVNmemoryPool *p, const char *s) { (void)p; (void)s; }
 // Debug labels: only for NVN debugging tools, unused by the host
@@ -2875,7 +2878,7 @@ static void rec_downsample(NVNcommandBuffer *c, const NVNtexture *s, const NVNte
     p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2);
     o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, ra); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, ra);
     copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv);
-    if (o->dst) mtl_pool_gpu_written(o->dst->pool);
+    if (o->dst) mtl_tex_gpu_written(o->dst->pool, o->dst->mem, o->dst->L.size);
     if (o->src) o->sr = (NVNcopyRegion){0, 0, 0, (int)o->src->d.width, (int)o->src->d.height, 1};
     if (o->dst) o->dr = (NVNcopyRegion){0, 0, 0, (int)o->dst->d.width, (int)o->dst->d.height, 1};
     o->flags = DM_COPY_RESOLVE;

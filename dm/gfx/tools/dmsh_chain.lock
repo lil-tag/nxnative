@@ -1,6 +1,6 @@
 # Translation chain tool fingerprints (written by tool_lock.py --update-lock; regenerate after changing tools and commit it)
-dmsh_xlate.dll	d53bded48bad9fd9
-Ryujinx.Graphics.Shader.dll	cb0e57bd3dc79b82
+dmsh_xlate.dll	ea88ebbe2af0aa28
+Ryujinx.Graphics.Shader.dll	a02db94f17c5116a
 Ryujinx.Common.dll	3ae2c4cbde6c4799
 xlate_source	71adcdd020e03a64
 spirv-cross	e37945d8e441d34d
