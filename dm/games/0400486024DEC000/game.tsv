@@ -37,6 +37,7 @@ shader_note	0400486024DEC000 shaders
 # agl wraps its depth clears in render conditions, as on Donkey Kong Bananza and Splatoon Raiders: in Kokiri Forest the main opaque pass tests EQUAL against a copy of the prepass depth
 # that a conditional clear (skipped on the console) wiped first, so no lit geometry landed and the full-screen sky showed through everywhere (a white scene)
 render_cond	on
+# Not gpu_timestamps segment, which upstream sets: on an M4 at the Kokiri porch it took the scene from 1536x864 to 683x384 and frames from 38 ms to 55-66 ms (p95 about 190 ms)
 render_base	1536x864 1440x810
 pool_skip_retired	on
 # The CPU writes the terrain tiles' height, blend and hole maps after creating the textures: without these they stay zero, and the ground has holes with its props floating (upstream 0400486024DEC000 README)
