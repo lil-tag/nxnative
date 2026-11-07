@@ -9726,9 +9726,12 @@ static id<MTLBuffer> gmem_map(void) {
     pthread_mutex_lock(&g_mu);
     for (int k = 0; k < g_nbig; k++) if (!g_big[k].full && addr_meets(g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
     gen = atomic_load(&g_pool_gen); pidx_sort();
+    // DM_NVN_GMEM_ALL=1: every pool goes in, as before the address filter. Ocarina of Time's agl fog shader (5ad65c0eefd09c7f) reads through pointers into pools the filter leaves out,
+    // reads 0 there and writes non-finite pixels: the white cloud at the forest exit. Costs what those pools hold (3.7 GB on Ocarina; PR #1585 is the fix that keeps the filter)
+    static int all = -1; if (all < 0) { const char *ga = getenv("DM_NVN_GMEM_ALL"); all = ga && atoi(ga); if (all) MLOG("raw global memory: every memory pool in the pool table (DM_NVN_GMEM_ALL)"); }
     for (int k = 0; k < g_npool; k++) {
         pool_ent *p = &g_pools[g_pidx[k]];
-        if (!addr_meets(p->lo, p->hi)) continue;
+        if (!all && !addr_meets(p->lo, p->hi)) continue;
         if (!p->res) { res_add(p->buf); p->res = 1; g_pool_res_n++; }
         uint64_t lo = MAX((uint64_t)p->lo, end), hi = p->hi;
         if (lo >= hi) continue;
@@ -11884,6 +11887,9 @@ static void ms_poll(void) {
                 if (((allm && uni && npx >= 64) || nbad) && nl < 8 && lo < sizeof line - 120) { float r, g, b; memcpy(&r, &q[1], 4); memcpy(&g, &q[2], 4); memcpy(&b, &q[3], 4); nl++;
                     lo += snprintf(line + lo, sizeof line - lo, " [%u,%u%s max %g %g %g non-finite %u]", t % tw * 16, t / tw * 16, uni ? " uniform" : "", r, g, b, nbad); } }
             fblk += ublk; if (e->pdist == 0 && e->att == 0) { g_ms_pmag += mag; pseen = 1; }
+            if (bad && e->att == 1) { static int dumped; const char *dd = getenv("DM_NVN_MAGSCAN_DUMP");
+                if (dd && *dd && !dumped++) { void dm_gfx_passdump_next(long n); void dm_gfx_texdump_next(const char *path); dm_gfx_passdump_next(1); dm_gfx_texdump_next(dd);
+                    MLOG("[mag] F%llu: attachment 1 ser=%llu holds non-finite pixels: the next frame's passes and colour targets are dumped to %s", (unsigned long long)s->frame, (unsigned long long)e->ser, dd); } }
             for (int q = 0; q < e->nfs && lo < sizeof line - 30; q++) lo += snprintf(line + lo, sizeof line - lo, " fs=%s", e->fs[q]);
             if (ublk || bad) MLOG("[mag] F%llu phase %llu pass %llu (shader's pass %+d) attachment %d ser=%llu format %d %ux%u: uniform magenta blocks %d (all-magenta blocks %d), non-finite pixels %llu%s", (unsigned long long)s->frame, (unsigned long long)(s->frame / (uint64_t)g_ms_plen % 4),
                                   (unsigned long long)e->pass_idx, e->pdist, e->att, (unsigned long long)e->ser, e->fmt, e->w, e->h, ublk, mblk, (unsigned long long)bad, line);
@@ -11903,11 +11909,12 @@ void ms_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
                 s->busy = 1; s->frame = f; s->n = 0; s->used = 0; s->full = 0; s->fence = 0; } } }
     ms_poll();
     if (g_ms_cur < 0) return;
-    g_ms_apass = g_stat_pass + 1; g_ms_nfs = 0;
+    g_ms_apass = g_stat_pass + 1;
     for (NSUInteger i = 0; i < nc && i < 8; i++) { id<MTLTexture> t = pd.colorAttachments[i].texture; if (!t) continue;
         g_ms_att[g_ms_na] = t; g_ms_lv[g_ms_na] = pd.colorAttachments[i].level; g_ms_sl[g_ms_na] = pd.colorAttachments[i].slice; g_ms_aser[g_ms_na] = R.rt.color[i] ? R.rt.color[i]->serial : 0; g_ms_na++; }
 }
 void ms_after(void) {
+    char fs[4][17]; int nfs = g_ms_nfs; memcpy(fs, g_ms_fs, sizeof fs); g_ms_nfs = 0;   // a draw is noted before its pass opens: the list is cleared when the pass ends
     if (!g_ms_na) return;
     int na = g_ms_na; g_ms_na = 0;
     if (g_ms_cur < 0 || g_stat_pass != g_ms_apass) { for (int i = 0; i < na; i++) g_ms_att[i] = nil; return; }
@@ -11931,7 +11938,7 @@ void ms_after(void) {
         if (t.textureType != MTLTextureType2D || g_ms_lv[i] || g_ms_sl[i]) v = [t newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(g_ms_lv[i], 1) slices:NSMakeRange(g_ms_sl[i], 1)];
         if (!v) continue;
         uint32_t *o = (uint32_t *)((uint8_t *)s->b.contents + s->used); o[0] = w; o[1] = h; o[2] = tw; o[3] = 0;
-        ms_ent *e = &s->e[s->n++]; e->pass_idx = g_stat_pass - g_ms_first; e->ser = g_ms_aser[i]; e->att = i; e->pdist = pdist; e->fmt = (int)pf; e->w = w; e->h = h; e->off = s->used; s->used += need; memcpy(e->fs, g_ms_fs, sizeof e->fs); e->nfs = g_ms_nfs;
+        ms_ent *e = &s->e[s->n++]; e->pass_idx = g_stat_pass - g_ms_first; e->ser = g_ms_aser[i]; e->att = i; e->pdist = pdist; e->fmt = (int)pf; e->w = w; e->h = h; e->off = s->used; s->used += need; memcpy(e->fs, fs, sizeof e->fs); e->nfs = nfs;
         if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
         id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL); [ce setArgumentTable:at];
         [at setTexture:v.gpuResourceID atIndex:0]; [at setAddress:s->b.gpuAddress + e->off atIndex:0];
