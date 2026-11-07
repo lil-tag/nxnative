@@ -8706,7 +8706,7 @@ static _Atomic int g_px_built, g_px_found, g_px_skipped, g_px_failed;
 static void px_done(id ps, int found, NSError *e, NSString *what) {
     if (ps) atomic_fetch_add(found ? &g_px_found : &g_px_built, 1);
     else if (atomic_fetch_add(&g_px_failed, 1) < 20) MLOG("[RED] extra prebuild: %s failed: %s", what.UTF8String, e ? e.localizedDescription.UTF8String : "no error given");
-    if (ps && !found && atomic_load(&g_arch_new) >= 400) arch_flush();   // the serializer holds what it captured until written
+    static _Atomic int since; if (ps && !found && atomic_fetch_add(&since, 1) % 400 == 399) arch_flush();   // the serializer holds what it captured until written; g_arch_new stays high until a file is written, so it can't time these: 2,885 tiny files
 }
 static void pre_mesh(NSString *tk, NSString *mk, NSString *fk, int zero) {
     @autoreleasepool {
