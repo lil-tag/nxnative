@@ -13566,7 +13566,7 @@ static int ndve_scale(id<MTLTexture> in, id<MTLTexture> out, const tex_t *desc) 
         !(out.usage & MTLTextureUsageRenderTarget)) return 0;
     zskip_del(desc->serial);
     sparse_gpu_wrote(desc);
-    mtl_pool_gpu_written(desc->pool);
+    mtl_tex_gpu_written(desc);
     rp_end();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     ubd_land_compute();
