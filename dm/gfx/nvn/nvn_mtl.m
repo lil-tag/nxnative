@@ -7977,7 +7977,7 @@ static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
 // A compile the archive captures, in the current flush period, counted there when it built (vd: the base has a vertex layout; *captured: it is in the period). No task options: a
 // captured base never imports archive entries (see the compaction crash below). One the capture refuses is built by the plain compiler (arch_cap_failed); a pipeline both refuse
 // returns the plain compiler's error, or the capture's when it gave none
-static id<MTLRenderPipelineState> arch_capture(MTL4RenderPipelineDescriptor *d, NSError **e, int vd, int *captured) {
+static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured) {   // a render or a task / mesh base (mtk_base, pre_mesh)
     if (captured) *captured = 0;
     if (!arch_capturing()) return [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
     ArchEpoch *ep = ep_enter(); NSError *ce = nil;
@@ -8102,6 +8102,7 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
             if (g_compact_enabled && atomic_load(&g_warm_running)) cps_harvest(d, 1);
             break;
         }
+        if (!ps) for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) { atomic_fetch_add(&g_cps_run, 1); break; }   // DM_PSO_PREBUILD=extra's
         atomic_fetch_add(&g_cps_look_ns, bp_now() - t0);
         if (ps) return ps;
     }
@@ -8110,7 +8111,9 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
     if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); cps_harvest(d, 0); }
     return ps;
 }
-// Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned
+// Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned; g_arch_flush_ok: the last one wrote its file
+static int g_arch_flush_ok;
+static int g_arch_keep;   // DM_PSO_PREBUILD=extra: every file is a p<seq> file, which compaction leaves alone: most of its pipelines are named by no prewarm list yet, and compaction drops those from plain files
 static void arch_compact_finish(void);
 static void arch_write_file(ArchEpoch *ep);
 static void arch_write(ArchEpoch *ep) {
@@ -8122,7 +8125,7 @@ static void arch_write_file(ArchEpoch *ep) {
     if (!n) return;
     [NSFileManager.defaultManager createDirectoryAtPath:g_arch_dir withIntermediateDirectories:YES attributes:nil error:nil];
     uint64_t t0 = bp_now(); NSError *e = nil;
-    NSString *path = [g_arch_dir stringByAppendingPathComponent:[NSString stringWithFormat:vd || cs ? @"%05d.mtl4a" : @"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
+    NSString *path = [g_arch_dir stringByAppendingPathComponent:[NSString stringWithFormat:(vd || cs) && !g_arch_keep ? @"%05d.mtl4a" : @"p%05d.mtl4a", g_arch_seq++]], *tmp = [path stringByAppendingString:@".tmp"];
     if (ep->compacting) [arch_compact_stamp() writeToFile:arch_compact_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     BOOL ok = [ep->ser serializeAsArchiveAndFlushToURL:[NSURL fileURLWithPath:tmp] error:&e];
     if (ep->compacting) unlink(arch_compact_marker().fileSystemRepresentation);
@@ -8317,6 +8320,34 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     return ps;
 }
 static id<MTLRenderPipelineState> pso_build(MTLRenderPipelineDescriptor *d, NSError **e) { return pso_build_ex(d, e, 1); }
+// A task / mesh pipeline's base, its colour state left open as pso_desc4's: an archive holds it, so a first draw takes it in about 1 ms where a whole build stalled the submit thread for up to 16.6 s (Ocarina of
+// Time, a first walk from the forest to Hyrule Field: 98 pipelines, 52 s). Used by the draw (mtk_build) and the prebuild (pre_mesh), which must describe it alike for a lookup to find it
+static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTL4FunctionDescriptor *tf, MTL4FunctionDescriptor *mf, MTL4FunctionDescriptor *ff, uint32_t payload, uint32_t t_threads, uint32_t m_threads, NSUInteger samples, int a2c) {
+    MTL4MeshRenderPipelineDescriptor *m = [MTL4MeshRenderPipelineDescriptor new];
+    m.meshFunctionDescriptor = mf; m.fragmentFunctionDescriptor = ff; m.maxTotalThreadsPerMeshThreadgroup = m_threads;
+    if (tf) { m.objectFunctionDescriptor = tf; m.payloadMemoryLength = (payload + 15u) & ~15u; m.maxTotalThreadsPerObjectThreadgroup = t_threads; }
+    m.rasterSampleCount = samples; m.alphaToCoverageState = a2c ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
+    for (int i = 0; i < 8; i++) {
+        MTL4RenderPipelineColorAttachmentDescriptor *a = m.colorAttachments[i];
+        a.pixelFormat = MTLPixelFormatUnspecialized; a.writeMask = MTLColorWriteMaskUnspecialized; a.blendingState = MTL4BlendStateUnspecialized;
+        a.sourceRGBBlendFactor = a.destinationRGBBlendFactor = a.sourceAlphaBlendFactor = a.destinationAlphaBlendFactor = MTLBlendFactorUnspecialized;
+        a.rgbBlendOperation = a.alphaBlendOperation = MTLBlendOperationUnspecialized;
+    }
+    return m;
+}
+// That base from the archives, or built and captured; *found: it came from an archive
+static id<MTLRenderPipelineState> mtk_base(MTL4MeshRenderPipelineDescriptor *b, NSError **e, int *found) {
+    id<MTLRenderPipelineState> base = nil; *found = 1;
+    for (id<MTL4Archive> a in g_arch4p) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) return base;
+    for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) {
+        // its file goes in this compaction: capture it again, as pso_build_ex does (no archive imports: the crash noted there)
+        if (g_compact_enabled && atomic_load(&g_warm_running)) { id<MTLRenderPipelineState> cb = arch_capture(b, nil, 1, NULL); if (cb) { base = cb; g_compacted++; } }
+        return base;
+    }
+    *found = 0; base = arch_capture(b, e, 0, NULL);
+    if (base && g_arch_cap) arch_note_new();
+    return base;
+}
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
 static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
     memset(k, 0, sizeof *k);
@@ -8525,7 +8556,7 @@ static NSDictionary *pre_json(NSString *key) { NSData *d = msl_data([NSString st
 static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int zero) {
     NSDictionary *vj = pre_json(vk), *fj = pre_json(fk);
     if (!vj || !fj || ![vj[@"chain"] isEqual:@DMSH_CHAIN] || ![fj[@"chain"] isEqual:@DMSH_CHAIN]) return nil;
-    if (vj[@"mesh_stage"]) return nil;   // a mesh shader's pair (shader_pairs.tsv holds them for its padding): mesh pipelines are built at the draw (nvn_geometry.inc mtk_pso), no base
+    if (vj[@"mesh_stage"]) return nil;   // a mesh shader's pair (shader_pairs.tsv holds them for its padding): a pair does not name its task shader; DM_PSO_PREBUILD=extra builds these bases from the whole programs (pre_mesh)
     NSString *ventry = zero && vj[@"entry_z"] ? vj[@"entry_z"] : vj[@"entry"], *fentry = fj[@"entry"] ?: @"main0";
     int pull = [vj[@"pull"] isKindOfClass:[NSDictionary class]];
     if (!pull && [vj[@"vertex_inputs"] count]) return nil;   // stage inputs and no pulling library: its pipelines need the draw's layout
@@ -8669,14 +8700,76 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     else dispatch_group_notify(g, dispatch_get_global_queue(qos, 0), done);
     return n;
 }
+// DM_PSO_PREBUILD=extra, a tool as =tool is: what the pair prebuild leaves to the draws and what stalls them on a first visit. Every task / mesh program's base (DM_PSO_MESH_PROGRAMS: lines of task or -, mesh, pixel
+// shader, from the game's BNSH variations) and every compute pipeline of the shader map, into p<seq> files. Each is looked up first, so it can be stopped and run again
+static _Atomic int g_px_built, g_px_found, g_px_skipped, g_px_failed;
+static void px_done(id ps, int found, NSError *e, NSString *what) {
+    if (ps) atomic_fetch_add(found ? &g_px_found : &g_px_built, 1);
+    else if (atomic_fetch_add(&g_px_failed, 1) < 20) MLOG("[RED] extra prebuild: %s failed: %s", what.UTF8String, e ? e.localizedDescription.UTF8String : "no error given");
+    if (ps && !found && atomic_load(&g_arch_new) >= 400) arch_flush();   // the serializer holds what it captured until written
+}
+static void pre_mesh(NSString *tk, NSString *mk, NSString *fk, int zero) {
+    @autoreleasepool {
+        NSDictionary *tj = tk ? pre_json(tk) : nil, *mj = pre_json(mk), *fj = pre_json(fk), *tst = tj[@"mesh_stage"], *mst = mj[@"mesh_stage"];
+        NSDictionary *fr = fj[@"raster"]; int prim = [fr isKindOfClass:[NSDictionary class]] && [fr[@"primitive_id"] intValue];   // built whole, as pso_build_ex says
+        if (!mst || !fj || prim || (tk && !tst) || ![mj[@"chain"] isEqual:@DMSH_CHAIN] || ![fj[@"chain"] isEqual:@DMSH_CHAIN]) { g_px_skipped++; return; }
+        NSError *e = nil;
+        id<MTLLibrary> tl = tk ? lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, tk], &e) : nil, ml = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, mk], &e), fl = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
+        MTL4FunctionDescriptor *tf = tl ? pre_fn(tl, tj[@"entry"]) : nil, *mf = ml ? pre_fn(ml, zero && mj[@"entry_z"] ? mj[@"entry_z"] : mj[@"entry"]) : nil, *ff = fl ? pre_fn(fl, fj[@"entry"] ?: @"main0") : nil;
+        if (!mf || !ff || (tk && !tf)) { g_px_skipped++; return; }
+        int found; id ps = mtk_base(mtk_desc4(tf, mf, ff, [tst[@"payload"] unsignedIntValue], [tst[@"threads"] unsignedIntValue], [mst[@"threads"] unsignedIntValue], 1, 0), &e, &found);   // one sample, no alpha to coverage: all of what the game draws its meshes with so far
+        px_done(ps, found, e, [NSString stringWithFormat:@"mesh pipeline %@ %@ %@", tk ?: @"-", mk, fk]);
+    }
+}
+static void pre_cs(NSString *key) {
+    @autoreleasepool {
+        NSDictionary *j = pre_json(key);
+        if (!j || ![j[@"chain"] isEqual:@DMSH_CHAIN]) { g_px_skipped++; return; }
+        NSError *e = nil; id<MTLLibrary> l = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, key], &e);
+        MTL4FunctionDescriptor *f = l ? pre_fn(l, j[@"entry"] ?: @"main0") : nil;
+        if (![f isKindOfClass:MTL4LibraryFunctionDescriptor.class]) { g_px_skipped++; return; }   // cps_new looks up only these
+        MTL4ComputePipelineDescriptor *d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = f;
+        id ps = nil; int found = 1;
+        for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) break;
+        if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) break;
+        if (!ps) { found = 0; ps = arch_capture_cs(d, &e); }
+        px_done(ps, found, e, [NSString stringWithFormat:@"compute pipeline %@", key]);
+    }
+}
+static void pre_extra(int threads, int zero) {
+    shmap_load(); pso4_init();
+    if (!g_comp4 || !g_arch_cap) { MLOG("[RED] extra prebuild: no Metal 4 compiler or no archive folder"); return; }
+    g_arch_keep = 1; uint64_t t0 = bp_now();
+    NSMutableArray<NSArray<NSString *> *> *jobs = [NSMutableArray array];
+    const char *pp = getenv("DM_PSO_MESH_PROGRAMS");
+    for (NSString *l in [(pp ? [NSString stringWithContentsOfFile:@(pp) encoding:NSUTF8StringEncoding error:nil] : @"") componentsSeparatedByString:@"\n"]) {
+        NSArray<NSString *> *c = [l componentsSeparatedByString:@"\t"]; if (c.count == 3 && ![c[2] isEqualToString:@"-"]) [jobs addObject:c]; }
+    NSUInteger meshes = jobs.count;
+    for (NSString *l in [[NSString stringWithContentsOfFile:g_shmap_path encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"]) {
+        NSArray<NSString *> *c = [l componentsSeparatedByString:@"\t"]; if (c.count >= 4 && [c[2] isEqualToString:@"compute"]) [jobs addObject:@[c[3]]]; }
+    NSUInteger n = jobs.count; __block _Atomic NSUInteger next = 0;
+    MLOG("extra prebuild: %lu task / mesh programs and %lu compute pipelines, %d workers", (unsigned long)meshes, (unsigned long)(n - meshes), threads);
+    dispatch_group_t g = dispatch_group_create();
+    for (int t = 0; t < threads; t++) dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (;;) {
+            NSUInteger i = atomic_fetch_add(&next, 1); if (i >= n) break;
+            NSArray<NSString *> *c = jobs[i];
+            if (c.count == 3) pre_mesh([c[0] isEqualToString:@"-"] ? nil : c[0], c[1], c[2], zero); else pre_cs(c[0]);
+            if (i % 250 == 0) MLOG("extra prebuild: %lu of %lu, %d built, %d already archived, %d left to the draws, %d failed, %.0f s", (unsigned long)i, (unsigned long)n, (int)g_px_built, (int)g_px_found, (int)g_px_skipped, (int)g_px_failed, (bp_now() - t0) / 1e9);
+        }
+    });
+    dispatch_group_wait(g, DISPATCH_TIME_FOREVER); arch_flush_wait();
+    MLOG("extra prebuild done: %lu of them, %d built, %d already archived, %d left to the draws, %d failed, %.1f s", (unsigned long)n, (int)g_px_built, (int)g_px_found, (int)g_px_skipped, (int)g_px_failed, (bp_now() - t0) / 1e9);
+}
 // DM_PSO_PREBUILD=tool: the prebuild alone (the host's other environment as for a run: DM_NVN_SHMAP, DM_MSL_DIR, DM_SAVE or DM_PSO_ARCHIVE), then exit; DM_PSO_PREBUILD_DEPTH=zero for
 // a game that sets the near=0 depth mode, DM_PSO_PREBUILD_THREADS=<n> workers (default: compile_tasks). Returns 0 when not asked for
 int mtl_pso_prebuild_tool(void) {
-    const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
+    const char *e = getenv("DM_PSO_PREBUILD"); if (!e || (strcmp(e, "tool") && strcmp(e, "extra"))) return 0;
     setenv("DM_PSO_MANIFEST", "off", 1);   // no prewarm (loading the shader map starts it)
     mtl_init(); const char *z = getenv("DM_PSO_PREBUILD_DEPTH"); if (z && !strcmp(z, "zero")) atomic_store(&g_depth_zero, 1);
     int threads = getenv("DM_PSO_PREBUILD_THREADS") ? atoi(getenv("DM_PSO_PREBUILD_THREADS")) : 0;
     if (threads <= 0) threads = compile_tasks();
+    if (!strcmp(e, "extra")) { pre_extra(threads, atomic_load(&g_depth_zero)); return 1; }
     if (pso_prebuild(threads, 1, QOS_CLASS_USER_INITIATED) < 0) MLOG("pipeline prebuild: nothing to do (no archive, no shader_pairs.tsv, prebuilt.tsv says it is done, or the archive bundled with the app holds every base)");
     return 1;
 }
@@ -13203,6 +13296,7 @@ static void dispatch(const p_dispatch *dp, const uint8_t *next) {
         if (cs->cps_failed) return;   // the same function fails the same way: asked again at every dispatch, Mario Kart World's refused shaders took 3,138 pipeline builds in 60 s
         NSError *e = nil; uint64_t bt = bp_now(); ps = cps_new(cs->fn, &e);
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
+        if (bp_now() - bt > 20000000) MLOG("compute pipeline %s: %.1f ms required at frame %llu", cs->key, (bp_now() - bt) / 1e6, (unsigned long long)atomic_load(&g_cur_frame));
         if (!ps) { cs->cps_failed = 1; MLOG("[RED] failed to create compute pipeline for %s: %s (its dispatches are skipped)", cs->key, e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);
         if (cs->key[0]) pso_user_record("C\t%s\n", cs->key);
