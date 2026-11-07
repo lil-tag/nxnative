@@ -405,6 +405,24 @@ static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
         *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
     }
 }
+// The frame-rate counter (DM_SHOW_FPS, as on iOS, here with the time per frame): frames put on screen per second and what each took on average over the last second, top left. A view over the game's, not in its drawable
+uint64_t mtl_present_count(void);
+static void fps_counter_add(NSView *v) {
+    NSTextField *l = [NSTextField labelWithString:@"-- fps"];
+    l.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightSemibold]; l.textColor = NSColor.whiteColor; l.alignment = NSTextAlignmentCenter;
+    l.wantsLayer = YES; l.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.45].CGColor; l.layer.cornerRadius = 5;
+    const CGFloat w = 116, h = 18;
+    l.frame = NSMakeRect(8, v.isFlipped ? 8 : NSHeight(v.bounds) - h - 8, w, h);
+    l.autoresizingMask = NSViewMaxXMargin | (v.isFlipped ? NSViewMaxYMargin : NSViewMinYMargin);
+    [v addSubview:l];
+    __block uint64_t n0 = mtl_present_count(); __block double t0 = CACurrentMediaTime();
+    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
+        (void)t; uint64_t n = mtl_present_count(); double now = CACurrentMediaTime(), dt = now - t0;
+        l.stringValue = n > n0 ? [NSString stringWithFormat:@"%.0f fps  %.1f ms", (n - n0) / dt, 1000 * dt / (n - n0)] : @"0 fps";
+        n0 = n; t0 = now;
+    }];
+    LOG("front end: frame-rate counter on (DM_SHOW_FPS)");
+}
 static void hq_fade(NSView *v, int in) {
     if (!v) return;
     if (in) v.alphaValue = 0;
@@ -1460,6 +1478,7 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
+        { const char *fc = getenv("DM_SHOW_FPS"); if (fc && atoi(fc)) fps_counter_add(v); }
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
