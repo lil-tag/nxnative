@@ -35,6 +35,7 @@ static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
+static int g_bg_play;   // DM_BACKGROUND_PLAY=1: out of focus the game stays in focus (1) and its controllers keep playing; the keyboard and mouse still follow the key window
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
@@ -308,14 +309,17 @@ static void pads_reread(void) {
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
 }
 static void hq_close(void);
+static void keys_release(void) {   // the keyboard and the mouse: what they hold when the window stops being key
+    [NSCursor setHiddenUntilMouseMoves:NO];
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+}
 static void input_release(void) {
     hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
-    [NSCursor setHiddenUntilMouseMoves:NO];
+    keys_release();
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
-    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
 }
 static void input_resume(void) {
@@ -522,6 +526,8 @@ int front_ctrl_support(int min, int max) {
 }
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
+    e = getenv("DM_BACKGROUND_PLAY"); g_bg_play = e && atoi(e);
+    if (g_bg_play) { GCController.shouldMonitorBackgroundEvents = YES; LOG("front end: the game keeps running and its controllers keep playing while another app is in front (DM_BACKGROUND_PLAY)"); }
     e = getenv("DM_KBD_PLAYER"); g_kbd_own = !g_merge && e && !strcmp(e, "own");
     e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
     static const char kbd = 0;
@@ -1540,7 +1546,9 @@ void front_run(void (*guest)(void)) {
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) {
+            (void)n; if (g_bg_play && !win.miniaturized) { hq_close(); keys_release(); return; }
+            input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
