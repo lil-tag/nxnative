@@ -9,3 +9,7 @@ vertex V clr_vs(uint i [[vertex_id]], device const float *z [[buffer(0)]]) { V o
     fragment O_##slot##_##T clr_fs_##slot##_##T(device const T##4 *v [[buffer(0)]]) { O_##slot##_##T o; o.c = v[0]; return o; }
 #define CLR_SLOT(slot) CLR_FS(slot, float) CLR_FS(slot, uint) CLR_FS(slot, int)
 CLR_SLOT(0) CLR_SLOT(1) CLR_SLOT(2) CLR_SLOT(3) CLR_SLOT(4) CLR_SLOT(5) CLR_SLOT(6) CLR_SLOT(7)
+// The finite guard (nvn_mtl.m finite_guard): one triangle over the pass that turns non-finite pixels of colour attachment 1 to 0, read from the tile, so it needs no extra pass and no shader access to the target
+vertex V finite_vs(uint i [[vertex_id]]) { V o; o.p = float4(float2(float((i << 1) & 2), float(i & 2)) * 2.0 - 1.0, 0.0, 1.0); return o; }
+struct FiniteOut { float4 c [[color(1)]]; };
+fragment FiniteOut finite_fs(float4 c [[color(1)]]) { if (all(isfinite(c))) discard_fragment(); FiniteOut o; o.c = float4(0.0); return o; }

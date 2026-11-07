@@ -4933,7 +4933,8 @@ static void rt_mirror_flush(void) {
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
 }
-static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
+static void finite_guard(void);
+static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_flush_pass(); finite_guard(); PD("E %llu pass ends in %s:%d", g_stat_pass, fn, line);
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
 #ifdef NVN_RT_RANGE_TEST
@@ -11831,7 +11832,9 @@ static int ms_on(void) {
 }
 static uint64_t g_ms_ppass = ~0ull, g_ms_pframe = ~0ull, g_ms_drawn, g_ms_dropped;
 // returns 1 = this phase drops the draw
+static char g_ms_fs[4][17]; static int g_ms_nfs;   // the fragment shaders the current pass has drawn with so far: a [mag] line names them
 static int ms_draw(NvProg *pr) {
+    if (ms_on() && pr->sh[1]) { int k = 0; while (k < g_ms_nfs && strncmp(g_ms_fs[k], pr->sh[1]->key, 16)) k++; if (k == g_ms_nfs && k < 4) { memcpy(g_ms_fs[k], pr->sh[1]->key, 16); g_ms_fs[k][16] = 0; g_ms_nfs++; } }
     if (!ms_on() || !pr->sh[1] || strncmp(pr->sh[1]->key, g_ms_key, strlen(g_ms_key))) return 0;   // a deferred draw returns before this when recorded and only arrives here when replayed: every draw passes exactly once
     uint64_t f = atomic_load(&g_cur_frame);
     if (f / (uint64_t)g_ms_plen % 4 == 1) { g_ms_dropped++; return 1; }
@@ -11853,7 +11856,7 @@ static const char k_ms_msl[] =
 "  device uint *q = o + 4 + 4 * (tg.y * o[2] + tg.x); q[0] = v[0] | v[1] << 16 | (v[2] == v[3] && v[4] == v[5] && v[6] == v[7] ? 1u << 31 : 0u); q[1] = v[3]; q[2] = v[5]; q[3] = v[7]; }\n";
 #define MS_BUF (16u << 20)
 #define MS_MAXE 256
-typedef struct { uint64_t pass_idx, ser; int att, pdist, fmt; uint32_t w, h, off; } ms_ent;
+typedef struct { uint64_t pass_idx, ser; int att, pdist, fmt; uint32_t w, h, off; char fs[4][17]; int nfs; } ms_ent;
 typedef struct { __strong id<MTLBuffer> b; uint64_t frame, fence; uint32_t used; int n, busy, full; ms_ent e[MS_MAXE]; } ms_scan;
 static ms_scan g_ms_s[2]; static int g_ms_cur = -1;   // which buffer this scan frame writes (-1 = not scanning this frame)
 static uint64_t g_ms_curf = ~0ull, g_ms_first;
@@ -11878,6 +11881,7 @@ static void ms_poll(void) {
                 if (((allm && uni && npx >= 64) || nbad) && nl < 8 && lo < sizeof line - 120) { float r, g, b; memcpy(&r, &q[1], 4); memcpy(&g, &q[2], 4); memcpy(&b, &q[3], 4); nl++;
                     lo += snprintf(line + lo, sizeof line - lo, " [%u,%u%s max %g %g %g non-finite %u]", t % tw * 16, t / tw * 16, uni ? " uniform" : "", r, g, b, nbad); } }
             fblk += ublk; if (e->pdist == 0 && e->att == 0) { g_ms_pmag += mag; pseen = 1; }
+            for (int q = 0; q < e->nfs && lo < sizeof line - 30; q++) lo += snprintf(line + lo, sizeof line - lo, " fs=%s", e->fs[q]);
             if (ublk || bad) MLOG("[mag] F%llu phase %llu pass %llu (shader's pass %+d) attachment %d ser=%llu format %d %ux%u: uniform magenta blocks %d (all-magenta blocks %d), non-finite pixels %llu%s", (unsigned long long)s->frame, (unsigned long long)(s->frame / (uint64_t)g_ms_plen % 4),
                                   (unsigned long long)e->pass_idx, e->pdist, e->att, (unsigned long long)e->ser, e->fmt, e->w, e->h, ublk, mblk, (unsigned long long)bad, line);
         }
@@ -11896,7 +11900,7 @@ void ms_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
                 s->busy = 1; s->frame = f; s->n = 0; s->used = 0; s->full = 0; s->fence = 0; } } }
     ms_poll();
     if (g_ms_cur < 0) return;
-    g_ms_apass = g_stat_pass + 1;
+    g_ms_apass = g_stat_pass + 1; g_ms_nfs = 0;
     for (NSUInteger i = 0; i < nc && i < 8; i++) { id<MTLTexture> t = pd.colorAttachments[i].texture; if (!t) continue;
         g_ms_att[g_ms_na] = t; g_ms_lv[g_ms_na] = pd.colorAttachments[i].level; g_ms_sl[g_ms_na] = pd.colorAttachments[i].slice; g_ms_aser[g_ms_na] = R.rt.color[i] ? R.rt.color[i]->serial : 0; g_ms_na++; }
 }
@@ -11924,7 +11928,7 @@ void ms_after(void) {
         if (t.textureType != MTLTextureType2D || g_ms_lv[i] || g_ms_sl[i]) v = [t newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(g_ms_lv[i], 1) slices:NSMakeRange(g_ms_sl[i], 1)];
         if (!v) continue;
         uint32_t *o = (uint32_t *)((uint8_t *)s->b.contents + s->used); o[0] = w; o[1] = h; o[2] = tw; o[3] = 0;
-        ms_ent *e = &s->e[s->n++]; e->pass_idx = g_stat_pass - g_ms_first; e->ser = g_ms_aser[i]; e->att = i; e->pdist = pdist; e->fmt = (int)pf; e->w = w; e->h = h; e->off = s->used; s->used += need;
+        ms_ent *e = &s->e[s->n++]; e->pass_idx = g_stat_pass - g_ms_first; e->ser = g_ms_aser[i]; e->att = i; e->pdist = pdist; e->fmt = (int)pf; e->w = w; e->h = h; e->off = s->used; s->used += need; memcpy(e->fs, g_ms_fs, sizeof e->fs); e->nfs = g_ms_nfs;
         if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
         id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)enc_c_begin(NULL); [ce setArgumentTable:at];
         [at setTexture:v.gpuResourceID atIndex:0]; [at setAddress:s->b.gpuAddress + e->off atIndex:0];
@@ -14205,6 +14209,33 @@ static id<MTLDepthStencilState> clr_dss(int dw, unsigned sm) {   // depth ALWAYS
     if (sm) { MTLStencilDescriptor *st = [MTLStencilDescriptor new]; st.stencilCompareFunction = MTLCompareFunctionAlways; st.stencilFailureOperation = st.depthFailureOperation = MTLStencilOperationKeep;
         st.depthStencilPassOperation = MTLStencilOperationReplace; st.readMask = 0xff; st.writeMask = sm; d.frontFaceStencil = d.backFaceStencil = st; }
     return c[dw][sm] = [g_dev newDepthStencilStateWithDescriptor:d];
+}
+// Ocarina of Time's white cloud: an effect draw leaves non-finite pixels in colour attachment 1 of a half-size RG11B10F target (scan: 270 to 153,453 pixels, in every cloud of a walk past the forest exit, frames 9,580 to 14,960 at 2048x1152);
+// model shaders read that target into the main picture, and the bloom chain spreads them over up to half the screen. Which effect writes them varies, so this clears them where they land, for every effect: the last draw of such a pass
+// reads attachment 1 from the tile and writes 0 over what is not finite. DM_NVN_FINITE_GUARD=0 turns it off
+static void finite_guard(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_FINITE_GUARD"); on = e ? atoi(e) != 0 : 1; if (!on) MLOG("non-finite pixel guard off (DM_NVN_FINITE_GUARD=0)"); }
+    uint32_t f1 = g_pass.cfmt[1];
+    if (!on || g_rt_merged || g_pass.layered || g_pass.samples > 1 || (f1 != MTLPixelFormatRG11B10Float && f1 != MTLPixelFormatRGBA16Float)) return;
+    static NSMutableDictionary<NSData *, id<MTLRenderPipelineState>> *cache; if (!cache) cache = [NSMutableDictionary dictionary];
+    uint32_t key[10]; memcpy(key, g_pass.cfmt, sizeof g_pass.cfmt); key[8] = g_pass.dfmt; key[9] = g_pass.sfmt;
+    NSData *kd = [NSData dataWithBytes:key length:sizeof key]; id ps = cache[kd];
+    if (ps == NSNull.null) return;
+    if (!ps) {
+        id<MTLLibrary> lib = clr_lib(); if (!lib) return;
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+        d.vertexFunction = [lib newFunctionWithName:@"finite_vs"]; d.fragmentFunction = [lib newFunctionWithName:@"finite_fs"];
+        for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) { d.colorAttachments[i].pixelFormat = (MTLPixelFormat)g_pass.cfmt[i]; d.colorAttachments[i].writeMask = i == 1 ? MTLColorWriteMaskAll : MTLColorWriteMaskNone; }
+        d.depthAttachmentPixelFormat = (MTLPixelFormat)g_pass.dfmt; d.stencilAttachmentPixelFormat = (MTLPixelFormat)g_pass.sfmt;
+        NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+        if (!ps) { MLOG("[RED] non-finite pixel guard: no pipeline for attachment 1 format %u: %s", f1, e.localizedDescription.UTF8String); cache[kd] = (id)NSNull.null; return; }
+        cache[kd] = ps; MLOG("non-finite pixel guard: on for passes with attachment 1 format %u, depth %u", f1, g_pass.dfmt);
+    }
+    id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)g_enc;
+    enc_r_pso(en, ps); g_enc_pso = nil; enc_r_dss(en, clr_dss(0, 0)); g_enc_dss = nil;   // the pass ends right after this draw
+    if (g_enc_vis) { enc_r_visibility(en, MTLVisibilityResultModeDisabled, 0); g_enc_vis = 0; }
+    enc_r_viewport(en, (MTLViewport){0, 0, (double)g_pass.tw, (double)g_pass.th, 0, 1}); enc_r_scissor(en, (MTLScissorRect){0, 0, g_pass.tw, g_pass.th});
+    enc_r_cull(en, MTLCullModeNone); enc_r_fill(en, MTLTriangleFillModeFill); enc_r_draw(en, MTLPrimitiveTypeTriangle, 0, 3);
 }
 static int clr_scissor(MTLScissorRect *sc) {   // the clear's scissor in the open pass, clamped as for draws; 0 = empty
     NSUInteger tw = g_pass.tw, th = g_pass.th; *sc = (MTLScissorRect){0, 0, tw, th};
