@@ -567,7 +567,8 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     if (!pso_ds_valid((uint32_t)d.depthAttachmentPixelFormat, (uint32_t)d.stencilAttachmentPixelFormat)) return nil;
     pso4_init();
     MTL4FunctionDescriptor *tf4 = ts ? fn4_of(ts->fn) : nil, *mf4 = fn4_of(ms->fn), *ff4 = fn4_of(d.fragmentFunction ?: mtk_nop_fragment());
-    if (g_comp4 && mf4 && ff4 && (!ts || tf4) && ![d.label isEqualToString:PSO_WHOLE]) {   // a fragment shader that reads the primitive ID needs a whole pipeline (pso_build_ex)
+    static int whole = -1; if (whole < 0) { const char *w = getenv("DM_MTK_WHOLE"); whole = w && atoi(w); }   // diagnostic: every mesh pipeline built whole, as before the archive
+    if (!whole && g_comp4 && mf4 && ff4 && (!ts || tf4) && ![d.label isEqualToString:PSO_WHOLE]) {   // a fragment shader that reads the primitive ID needs a whole pipeline (pso_build_ex)
         id<MTLRenderPipelineState> base = mtk_base(mtk_desc4(tf4, mf4, ff4, ts ? ts->mesh_payload : 0, ts ? ts->mesh_threads : 0, ms->mesh_threads, d.rasterSampleCount, d.alphaToCoverageEnabled));
         if (base) {
             MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);   // really a MTL4MeshRenderPipelineDescriptor: the same colorAttachments
