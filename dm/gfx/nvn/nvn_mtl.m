@@ -8335,18 +8335,11 @@ static MTL4MeshRenderPipelineDescriptor *mtk_desc4(MTL4FunctionDescriptor *tf, M
     }
     return m;
 }
-// That base from the archives, or built and captured; *found: it came from an archive
-static id<MTLRenderPipelineState> mtk_base(MTL4MeshRenderPipelineDescriptor *b, NSError **e, int *found) {
-    id<MTLRenderPipelineState> base = nil; *found = 1;
-    for (id<MTL4Archive> a in g_arch4p) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) return base;
-    for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) {
-        // its file goes in this compaction: capture it again, as pso_build_ex does (no archive imports: the crash noted there)
-        if (g_compact_enabled && atomic_load(&g_warm_running)) { id<MTLRenderPipelineState> cb = arch_capture(b, nil, 1, NULL); if (cb) { base = cb; g_compacted++; } }
-        return base;
-    }
-    *found = 0; base = arch_capture(b, e, 0, NULL);
-    if (base && g_arch_cap && !g_arch_keep) arch_note_new();   // the prebuild flushes in batches: each small file slows every later lookup
-    return base;
+// That base when the prebuild left one (DM_PSO_PREBUILD=extra's p<seq> files), else nil: the draw then builds its pipeline whole. Never built here, because a mesh shader with per-primitive outputs
+// finished from an open base hung the GPU at its first draw (Ocarina of Time's AglShader mesh 147550d4e76629d5 with pixel shader 442da04b508b2667, Apple M4, macOS 27.2; the same shader built whole, through either compiler, did not). pre_mesh leaves such shaders out
+static id<MTLRenderPipelineState> mtk_base(MTL4MeshRenderPipelineDescriptor *b) {
+    for (id<MTL4Archive> a in g_arch4p) { id<MTLRenderPipelineState> base = [a newRenderPipelineStateWithDescriptor:b error:nil]; if (base) return base; }
+    return nil;
 }
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
 static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
@@ -8717,7 +8710,14 @@ static void pre_mesh(NSString *tk, NSString *mk, NSString *fk, int zero) {
         id<MTLLibrary> tl = tk ? lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, tk], &e) : nil, ml = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, mk], &e), fl = lib_from_file([NSString stringWithFormat:@"%@/%@_b.metallib", g_msl_dir, fk], &e);
         MTL4FunctionDescriptor *tf = tl ? pre_fn(tl, tj[@"entry"]) : nil, *mf = ml ? pre_fn(ml, zero && mj[@"entry_z"] ? mj[@"entry_z"] : mj[@"entry"]) : nil, *ff = fl ? pre_fn(fl, fj[@"entry"] ?: @"main0") : nil;
         if (!mf || !ff || (tk && !tf)) { g_px_skipped++; return; }
-        int found; id ps = mtk_base(mtk_desc4(tf, mf, ff, [tst[@"payload"] unsignedIntValue], [tst[@"threads"] unsignedIntValue], [mst[@"threads"] unsignedIntValue], 1, 0), &e, &found);   // one sample, no alpha to coverage: all of what the game draws its meshes with so far
+        // Per-primitive outputs hang the GPU when finished from an open base (mtk_base), and no reflection names them: only the source does
+        NSData *src = msl_data([NSString stringWithFormat:@"%@/%@_b.metal", g_msl_dir, mk]); NSString *ss = src ? [[NSString alloc] initWithData:src encoding:NSUTF8StringEncoding] : nil;
+        NSRange pr = ss ? [ss rangeOfString:@"struct dm_prim_t {"] : (NSRange){NSNotFound, 0}, pe = pr.location != NSNotFound ? [ss rangeOfString:@"};" options:0 range:NSMakeRange(pr.location, ss.length - pr.location)] : pr;
+        if (!ss || (pr.location != NSNotFound && [ss rangeOfString:@"user(locn" options:0 range:NSMakeRange(pr.location, pe.location - pr.location)].location != NSNotFound)) { g_px_skipped++; return; }
+        MTL4MeshRenderPipelineDescriptor *b = mtk_desc4(tf, mf, ff, [tst[@"payload"] unsignedIntValue], [tst[@"threads"] unsignedIntValue], [mst[@"threads"] unsignedIntValue], 1, 0);   // one sample, no alpha to coverage: all of what the game draws its meshes with so far
+        id ps = mtk_base(b); int found = ps != nil;
+        if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newRenderPipelineStateWithDescriptor:b error:nil])) { found = 1; break; }
+        if (!ps) ps = arch_capture(b, &e, 0);
         px_done(ps, found, e, [NSString stringWithFormat:@"mesh pipeline %@ %@ %@", tk ?: @"-", mk, fk]);
     }
 }

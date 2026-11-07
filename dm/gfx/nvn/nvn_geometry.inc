@@ -550,7 +550,7 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
 // A program's task and mesh shaders are Metal object and mesh functions (dmsh_meshstage.py), kept in the tessellation stages' places (sh[3], sh[4]). The draw goes through draw() with its
 // pixel stage alone, a program of its own as a geometry draw's raster stage is, so it takes the render pass and the pixel stage's state like any draw; mtk_pso gives its pipeline and
 // mtk_encode binds the two stages and draws. The mesh stage shares the vertex stage's table, as geo_mesh_encode's does, and a task shader has the object stage's; both read the
-// draw's first workgroup at buffer 29. Native meshes have no equivalent stand-in: a required miss is made before encoding the draw, from its base in an archive when the prebuild or an earlier run left one (mtk_desc4), and the recorded state is prewarmed next time.
+// draw's first workgroup at buffer 29. Native meshes have no equivalent stand-in: a required miss is made before encoding the draw, from its base in an archive when the prebuild left one (mtk_desc4), else built whole, and the recorded state is prewarmed next time.
 static struct { int on, miss; NvShader *ts, *ms; uint32_t first, count; uint64_t ind, ind_first; } g_mtk;   // ind: an indirect draw's threadgroups, ind_first: where the GPU finds its first
 static void draw_(const p_draw *dw, const p_draw_idx *di);
 static uint64_t g_mtk_n;
@@ -568,11 +568,13 @@ static id<MTLRenderPipelineState> mtk_build(const pso_key *k, NvShader *ts, NvSh
     pso4_init();
     MTL4FunctionDescriptor *tf4 = ts ? fn4_of(ts->fn) : nil, *mf4 = fn4_of(ms->fn), *ff4 = fn4_of(d.fragmentFunction ?: mtk_nop_fragment());
     if (g_comp4 && mf4 && ff4 && (!ts || tf4) && ![d.label isEqualToString:PSO_WHOLE]) {   // a fragment shader that reads the primitive ID needs a whole pipeline (pso_build_ex)
-        int found; id<MTLRenderPipelineState> base = mtk_base(mtk_desc4(tf4, mf4, ff4, ts ? ts->mesh_payload : 0, ts ? ts->mesh_threads : 0, ms->mesh_threads, d.rasterSampleCount, d.alphaToCoverageEnabled), error, &found);
-        if (!base) return nil;
-        MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);   // really a MTL4MeshRenderPipelineDescriptor: the same colorAttachments
-        for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
-        return [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:base error:error];
+        id<MTLRenderPipelineState> base = mtk_base(mtk_desc4(tf4, mf4, ff4, ts ? ts->mesh_payload : 0, ts ? ts->mesh_threads : 0, ms->mesh_threads, d.rasterSampleCount, d.alphaToCoverageEnabled));
+        if (base) {
+            MTL4RenderPipelineDescriptor *s = spec_desc(base, &g_spec_own);   // really a MTL4MeshRenderPipelineDescriptor: the same colorAttachments
+            for (int i = 0; i < 8; i++) pso_col4(s.colorAttachments[i], d.colorAttachments[i]);
+            id<MTLRenderPipelineState> ps = [g_comp4 newRenderPipelineStateBySpecializationWithDescriptor:s pipeline:base error:error];
+            if (ps) return ps;
+        }
     }
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = ms->fn; m.fragmentFunction = d.fragmentFunction ?: mtk_nop_fragment(); m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
