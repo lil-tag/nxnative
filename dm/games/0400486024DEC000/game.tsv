@@ -25,8 +25,9 @@ zip_store	.zs:.bwav:.webm:.metallib
 # ---- Memory ----
 # The Switch 2 leaves games 9 GB of its 12 GB (Donkey Kong Bananza's figure). The NPDM declares 48 MB of system resource, so virtual address memory is on.
 # nninitStartup asks SetHeapSize 0x18ce00000 (6.2 GB) with the 9 GB pool, as Mario Kart World. 256 MB in front + 4 GB alias region + 256 MB stack region + 8 GB heap region: a starting split, to be measured
-mem_reserve	0x320000000
-mem_alias	0x100000000
+# 16 GB of address space, as upstream #1444 and #1590: a smaller alias region ran out in long sessions and left a black screen leaving the Deku Tree
+mem_reserve	0x668000000
+mem_alias	0x400000000
 mem_map_limit	on
 mem_stack	0x10000000
 app_pool	0x240000000
@@ -44,7 +45,8 @@ fps_target	60
 # ---- Graphics ----
 # agl wraps its clears in render conditions on Donkey Kong Bananza and Splatoon Raiders; the same library here
 render_cond	on
-gpu_timestamps	segment
+render_base	1536x864 1440x810
+# Not gpu_timestamps segment, which upstream sets: on an M4 walking the forest it took the render size from 1536x864 to 683x384 for 33.0 against 37.2 ms a frame, and the blur shows
 draw_barriers	game
 # As Tears of the Kingdom: the terrain's height, blend and hole maps are written by the CPU into textures after they are created. Without these keys they stay zero: holes in the ground and the wrong materials
 tex_flush_upload	on

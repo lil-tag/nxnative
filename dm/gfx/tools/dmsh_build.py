@@ -55,6 +55,41 @@ XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-textur
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
 
+# Loop guard (upstream PR 1444): every loop in a shader also ends once the function has run LOOP_CAP iterations in all, so a loop that never ends on the host (a wrong translation,
+# an uninitialized bound, a value the replay does not fill) cannot hang the GPU, which on macOS can stop the whole Mac. One counter per function, so nested loops cannot multiply past the cap.
+# Runs last. shortcut: geometry paths may meet it twice, so a guarded source is left alone
+LOOP_CAP = 1 << 18
+def loop_guard(msl):
+    if 'dm_lg' in msl: return msl
+    cap = f'++dm_lg < {LOOP_CAP}u'
+    def guarded(l):
+        if (m := re.fullmatch(r'(\s*)\} while \((.*)\);\s*', l)): return f'{m.group(1)}}} while (({m.group(2)}) && {cap});'
+        if (m := re.fullmatch(r'(\s*)for \(;;\)\s*', l)): return f'{m.group(1)}for (; {cap};)'
+        if (m := re.fullmatch(r'(\s*)while \((.*)\)\s*', l)): return f'{m.group(1)}while (({m.group(2)}) && {cap})'
+        if (m := re.fullmatch(r'(\s*)for \(([^;]*);([^;]*);([^;]*)\)\s*', l)): return f'{m.group(1)}for ({m.group(2)}; ({m.group(3).strip() or "true"}) && {cap};{m.group(4)})'
+        return l
+    lines, out, i = msl.split('\n'), [], 0
+    while i < len(lines):
+        l = lines[i]; out.append(l); i += 1
+        if l != '{' or len(lines) < 2 or not lines[i - 2].rstrip().endswith(')'): continue   # a function body: SPIRV-Cross puts its brace alone in column 0; a struct's header does not end in ')'
+        j = i
+        while j < len(lines) and lines[j] != '}': j += 1
+        body = [guarded(x) for x in lines[i:j]]
+        if body != lines[i:j]: out.append('    uint dm_lg = 0u; (void)dm_lg;')   # only where there is a loop: a shader with none keeps its text, so the compile cache keeps its library across a chain change
+        out += body; i = j
+    return '\n'.join(out)
+
+# Ocarina of Time's ground fog (5ad65c0eefd09c7f) discards where its surface lies behind the depth a mesh shader drew just before. On Apple's GPUs gl_FragCoord.z and the stored depth of nearly the same
+# surface differ by rounding (inferred; the fix is what was measured), and the strict test punched single-pixel holes of no fog, thousands a frame on an M4: 5,287 isolated holes in one view, 0 with the tolerance
+FOG_TOLERANCE = {'5ad65c0eefd09c7f': '4e-6f'}
+def fog_tolerance(key, msl):
+    t = FOG_TOLERANCE.get(key)
+    if not t: return msl
+    tests = re.findall(r'if \((_\d+)\)\s*\{\s*discard_fragment\(\);', msl)
+    for x in set(tests): msl, n = re.subn(rf'\bbool {x} = (_\d+) > (_\d+);', rf'bool {x} = \1 > (\2 + {t});', msl); tests = tests if n else []
+    if not tests: print(f'[RED] {key}: the discard test has another shape, no tolerance added', file=sys.stderr)
+    return msl
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -1508,7 +1543,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        plain = dmsh_geometry.topology_pointer(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))
+        plain = dmsh_geometry.topology_pointer(pool_arrays(loop_guard(precise(dmsh_atomic.check_msl(r.stdout)))))
         src = dmsh_geometry.capture_input(plain)
         res = json.load(open(os.path.join(w, k + '.res.json')))
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
@@ -1538,7 +1573,7 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, spv), spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(precise(dmsh_atomic.check_msl(r.stdout))))))
+            reader = vs_layer(vs_init(dmsh_geometry.reader(pool_arrays(loop_guard(precise(dmsh_atomic.check_msl(r.stdout)))))))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
@@ -1627,6 +1662,8 @@ def finish(key, w, j, c1):
     else: fu = fd = None
     try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
+    final = open(msl).read(); rr = loop_guard(fog_tolerance(key, final))
+    if rr != final: open(msl, 'w').write(rr)
     side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
         if j['stage'] == 'ps': side.clear(); side.update(ps_libraries(key, msl, open(msl).read(), binds)); return
@@ -1636,7 +1673,7 @@ def finish(key, w, j, c1):
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
         lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('dual source', fd)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
-        open(msl, 'w').write(plain); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
+        open(msl, 'w').write(loop_guard(fog_tolerance(key, plain))); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))

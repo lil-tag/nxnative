@@ -13054,7 +13054,7 @@ static int ndve_direct_role(NvShader *cs) {
     static int enabled = -1;
     if (enabled < 0) {
         const char *e = getenv("DM_NVN_NDVE_MOVIE_DIRECT");
-        enabled = e && !strcmp(e, "1");
+        enabled = !e || strcmp(e, "0");   // on unless =0: the library's 14 passes take this game's title and movies below 60 fps on an M4
     }
     if (!enabled) return 0;
     if (!strcmp(cs->key, "49dff010b9832251_b")) return 1;
