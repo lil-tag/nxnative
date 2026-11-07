@@ -8345,7 +8345,7 @@ static id<MTLRenderPipelineState> mtk_base(MTL4MeshRenderPipelineDescriptor *b, 
         return base;
     }
     *found = 0; base = arch_capture(b, e, 0, NULL);
-    if (base && g_arch_cap) arch_note_new();
+    if (base && g_arch_cap && !g_arch_keep) arch_note_new();   // the prebuild flushes in batches: each small file slows every later lookup
     return base;
 }
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
