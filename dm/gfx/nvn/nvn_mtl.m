@@ -5595,7 +5595,8 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
             t_lib_layer = memmem(f.data, f.size, "render_target_array_index", 25) != NULL;
             void *base = f.base; size_t base_len = f.base_len;
             dispatch_data_t d = dispatch_data_create(f.data, f.size, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(base, base_len); });
-            return [g_dev newLibraryWithData:d error:err];
+            id<MTLLibrary> l = [g_dev newLibraryWithData:d error:err]; l.label = path.lastPathComponent;   // the capture turn's key (cap_enter)
+            return l;
         }
         if (!x) errno = open_errno;
     }
@@ -5604,7 +5605,8 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     t_lib_layer = m != MAP_FAILED && memmem(m, len, "render_target_array_index", 25) != NULL;   // the library's functions use the layer: for a vertex library, its output (shader_load)
     if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
     dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
-    return [g_dev newLibraryWithData:d error:err];
+    id<MTLLibrary> l = [g_dev newLibraryWithData:d error:err]; l.label = path.lastPathComponent;
+    return l;
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_build.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
 // main0_z leaves z as is (near = 0, which Link's Awakening, 13 Sentinels and Engage set). Loading picks by the mode the game set, so no game needs a setting for it
@@ -7984,11 +7986,46 @@ static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
 // A compile the archive captures, in the current flush period, counted there when it built (vd: the base has a vertex layout; *captured: it is in the period). No task options: a
 // captured base never imports archive entries (see the compaction crash below). One the capture refuses is built by the plain compiler (arch_cap_failed); a pipeline both refuse
 // returns the plain compiler's error, or the capture's when it gave none
+// Capture compiles that share a stage function take turns (upstream issue #815, Aeonitis' finding): Metal's capture cache (MultiLevelAirntBinaryCache::getElementAtDestination) reads an entry
+// of the capture archive it has not retained, and another compile capturing the same program can free it first. Ocarina of Time's pipeline prebuild died of it (SIGSEGV in objc_msgSend) 15,000
+// pairs into a build on an M4, and 3 runs of 3 on an M2 Max. The key is a stage function's library label (lib_from_file: its file name) and name; a compile waits at most 2 s for its turn,
+// so one the system compiler never finishes holds no other back for long
+static NSMutableSet<NSString *> *g_cap_busy; static pthread_mutex_t g_cap_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cap_cv = PTHREAD_COND_INITIALIZER;
+static void cap_key(MTL4FunctionDescriptor *fd, NSMutableArray<NSString *> *keys) {
+    MTL4FunctionDescriptor *f = [fd isKindOfClass:[MTL4SpecializedFunctionDescriptor class]] ? ((MTL4SpecializedFunctionDescriptor *)fd).functionDescriptor : fd;
+    if (![f isKindOfClass:[MTL4LibraryFunctionDescriptor class]]) return;
+    MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f;
+    if (l.name && l.library.label) [keys addObject:[NSString stringWithFormat:@"%@/%@", l.library.label, l.name]];
+}
+static NSArray<NSString *> *cap_enter(MTL4PipelineDescriptor *d) {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    if ([d isKindOfClass:[MTL4RenderPipelineDescriptor class]]) { MTL4RenderPipelineDescriptor *r = (MTL4RenderPipelineDescriptor *)d; cap_key(r.vertexFunctionDescriptor, keys); cap_key(r.fragmentFunctionDescriptor, keys); }
+    else if ([d isKindOfClass:[MTL4MeshRenderPipelineDescriptor class]]) { MTL4MeshRenderPipelineDescriptor *m = (MTL4MeshRenderPipelineDescriptor *)d; cap_key(m.objectFunctionDescriptor, keys); cap_key(m.meshFunctionDescriptor, keys); cap_key(m.fragmentFunctionDescriptor, keys); }
+    else if ([d isKindOfClass:[MTL4ComputePipelineDescriptor class]]) cap_key(((MTL4ComputePipelineDescriptor *)d).computeFunctionDescriptor, keys);
+    if (!keys.count) return keys;
+    struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += 2;
+    pthread_mutex_lock(&g_cap_mu);
+    if (!g_cap_busy) g_cap_busy = [NSMutableSet set];
+    for (;;) {
+        BOOL busy = NO; for (NSString *k in keys) if ([g_cap_busy containsObject:k]) { busy = YES; break; }
+        if (!busy || pthread_cond_timedwait(&g_cap_cv, &g_cap_mu, &until) == ETIMEDOUT) break;
+    }
+    NSMutableArray<NSString *> *mine = [NSMutableArray array];
+    for (NSString *k in keys) if (![g_cap_busy containsObject:k]) { [g_cap_busy addObject:k]; [mine addObject:k]; }
+    pthread_mutex_unlock(&g_cap_mu);
+    return mine;
+}
+static void cap_leave(NSArray<NSString *> *mine) {
+    if (!mine.count) return;
+    pthread_mutex_lock(&g_cap_mu); for (NSString *k in mine) [g_cap_busy removeObject:k]; pthread_cond_broadcast(&g_cap_cv); pthread_mutex_unlock(&g_cap_mu);
+}
 static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured) {   // a render or a task / mesh base (mtk_base, pre_mesh)
     if (captured) *captured = 0;
     if (!arch_capturing()) return [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
     ArchEpoch *ep = ep_enter(); NSError *ce = nil;
+    NSArray<NSString *> *turn = cap_enter(d);
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    cap_leave(turn);
     int full = 0;
     if (ps) { atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); } full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep);
@@ -8002,7 +8039,9 @@ static id<MTLComputePipelineState> arch_capture_cs(MTL4ComputePipelineDescriptor
     if (captured) *captured = 0;
     if (!arch_capturing()) return [g_comp4 newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
     ArchEpoch *ep = ep_enter(); NSError *ce = nil;
+    NSArray<NSString *> *turn = cap_enter(d);
     id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
+    cap_leave(turn);
     int full = 0;
     if (ps) { atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep);
@@ -8670,13 +8709,17 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0);
+    // Strided: the i-th pair taken is the (i / threads)-th of stretch i % threads, so the workers are in far apart stretches at any moment and the pairs that share a vertex shader (listed
+    // together) do not compile at once, the capture race above (issue #815; that report: 13.5 to 18 bases a second as well)
+    int span = (n + threads - 1) / threads, end = span * threads;
     dispatch_group_t g = dispatch_group_create();
     for (int t = 0; t < threads; t++) dispatch_group_async(g, dispatch_get_global_queue(qos, 0), ^{
         for (;;) {
             int i = atomic_fetch_add(&g_pre_next, 1);
             // the first worker to find no pair left hands the period over: it is written once the compiles still under way in it return, not after the slowest of all
-            if (i >= n) { if (i == n) arch_flush(); break; }
-            pre_pair(pairs[(NSUInteger)i][0], pairs[(NSUInteger)i][1], zero);
+            if (i >= end) { if (i == end) arch_flush(); break; }
+            int at = (i % threads) * span + i / threads; if (at >= n) continue;
+            pre_pair(pairs[(NSUInteger)at][0], pairs[(NSUInteger)at][1], zero);
             int d = ++g_pre_done;
             if (d % 1000 == 0) {
                 MLOG("pipeline prebuild: %d of %d pairs, %d built, %d already archived, %d left to the draws, %d failed, %.0f s", d, n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
