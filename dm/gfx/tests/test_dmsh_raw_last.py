@@ -25,7 +25,7 @@ exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Assign) 
 MAC_METAL = scope['MAC_METAL']
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
-HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+)\)\n\{\n')
+HELPER = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){3}const device (_\d+)& \w+, const device _\d+& \w+, thread uint& (_\d+)\)\n\{\n')   # with #1585: the site, and its table
 
 # The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start,
 # entry 0 empty, unused entries starting at ~0. Pools A and B are adjacent, C lies past a gap and above 4 GiB, and its 2 MiB chunk has a hint naming it (the only pool there; the gap after it is in
@@ -94,7 +94,7 @@ class RawLast(Translated):
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
                   '{\n    uint last = 0u;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
-                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, map, last);\n    }}\n}}\n')
+                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, -1, map, map, last);\n    }}\n}}\n')
         with tempfile.TemporaryDirectory() as w:
             w = Path(w)
             (w / 'k.metal').write_text(kernel)
@@ -109,7 +109,7 @@ class RawLast(Translated):
 
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
 def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
-VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')
+VEC_HELPER = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){3}const device (_\d+)& \w+, const device _\d+& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')   # with #1585: the site, and its table
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -133,6 +133,30 @@ class RawVector(Translated):
         self.assertFalse(scalar and re.search(scalar.group(1) + r'\(', main), 'a word of the 128-bit load went through the scalar helper')
         for k in range(3): self.assertRegex(main, re.escape(m.group(4)) + rf'\[{k}\]')
 
+    def test_a_miss_zeroes_the_other_words(self):   # gmem_vec has no initial value and the caller reads its words after the call (#1813)
+        msl = self.msl()
+        m = VEC_HELPER.search(msl)
+        helper = msl[m.end():msl.index('\n}\n', m.end())]
+        miss = helper[helper.rindex('return'):]
+        self.assertTrue(miss.startswith('return 0;'), miss)
+        before = helper[:helper.rindex('return')]
+        before = before[max(before.rindex('}'), before.rindex('{')):]   # the miss path: the straight run of lines that ends in its return
+        for k in range(3): self.assertIn(f'{m.group(4)}[{k}] = 0u;', before, helper[-600:])
+
+    def test_a_64_bit_miss_zeroes_its_other_word(self):
+        ldg64 = ((LDG[0] & ~(7 << 9)) | 5 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.64 R12, [R5.64 + UR4]: size bits = 5 (B64), R12..R13
+        code = (s2r_tid(9), s2r_tid(5), ldg64, sts(12, 0), sts(13, 4))
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+        m = VEC_HELPER.search(msl)
+        self.assertTrue(m, msl[:3000])
+        helper = msl[m.end():msl.index('\n}\n', m.end())]
+        self.assertIn('uint2 ', helper)
+        before = helper[:helper.rindex('return')]
+        before = before[max(before.rindex('}'), before.rindex('{')):]
+        self.assertTrue(helper[helper.rindex('return'):].startswith('return 0;'))
+        self.assertIn(f'{m.group(4)}[0] = 0u;', before, helper[-600:])
+        self.assertNotIn(f'{m.group(4)}[1] = 0u;', before)
+
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_reads_on_gpu(self):
         msl = self.msl()
@@ -141,8 +165,8 @@ class RawVector(Translated):
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
                   '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
-                  f'        int w = {m.group(1)}(lo, hi, map, last, vec);\n'
-                  '        out[id * 16 + s] = w == 0 || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
+                  f'        vec[0] = vec[1] = vec[2] = 0xdeadu; int w = {m.group(1)}(lo, hi, -1, map, map, last, vec);\n'   # -1: no bind-time site (#1585), its table unread; a miss must not leave the words as they were
+                  '        out[id * 16 + s] = (w == 0 && vec[0] == 0u && vec[1] == 0u && vec[2] == 0u) || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
         with tempfile.TemporaryDirectory() as w:
             w = Path(w)
             (w / 'k.metal').write_text(kernel)

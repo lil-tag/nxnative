@@ -6,6 +6,16 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md), [Splatoon Raiders](dm/games/0400380020056000/README.md), [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md), [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md), [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md), [Mario Kart World](dm/games/0400C3F00006E000/README.md) and [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md) play on the Mac, packed from one [`.nup` file](#switch-2-games) or a dump of the game; iPhone and iPad are untested.
 
+## This fork: swordboiMacNative
+
+This is [nxnative](https://github.com/seedds/nxnative) with one game in mind, The Legend of Zelda: Ocarina of Time (Switch 2, `0400486024DEC000` v131072) as a Mac app, built and played on an Apple silicon Mac. It follows upstream `main` closely and carries, on top of it:
+
+- upstream pull requests that were still open when we needed them, applied with a three-way merge; each commit names the PRs it applies and their authors, whose work it is;
+- a pipeline-archive fix of ours: the archive was compacted again at every start (3 minutes of "Preparing shaders" each launch); now only the files flushed since the last compaction are compacted, and the start takes seconds;
+- a fixed render resolution (`DM_FIXED_RESOLUTION`, `DM_FIXED_SCALE`), a Metal HUD menu item (Window > Metal HUD), the Pro Controller's gyro zero learned at rest, and `DM_NVN_COND_CONSERVATIVE` as an A/B switch for the occlusion conditions.
+
+The build is upstream's: `python3 scripts/build_ipa_from_nsp.py <your .nup> --platform mac-app --work-dir <work> -o "Zelda Ocarina of Time.app"`, with your own dump. Nothing from the game is in this repository, as upstream. Bugs in what this fork adds go in this fork's issues; everything else belongs to [upstream](https://github.com/seedds/nxnative/issues). The game's note is [dm/games/0400486024DEC000/README.md](dm/games/0400486024DEC000/README.md).
+
 ## Acknowledgements
 
 This project is built on other people's work ([licenses](dm/third_party/README.md)):

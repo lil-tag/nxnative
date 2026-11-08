@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Fixed resolution](#fixed-resolution), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Sharpening](#sharpening), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -34,6 +34,14 @@ Off, the default, keeps the 3D picture at full size. On lets the game lower its 
 ### Render scale
 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
+
+### Fixed resolution
+
+Shown for games whose resolution controller the app can switch off (Ocarina of Time). Off, the default, keeps the game's dynamic resolution: it measures the GPU's time per frame and lowers the 3D's size to hold its frame rate, and on a Mac whose translated frame runs over 16.7 ms it settles at its floor (911x512 docked). On, the game takes its own "dynamic resolution disabled" path and renders the 3D at its top size (1536x864 docked), or at **Fixed resolution scale** of it (50 to 100 %); the frame rate then drops where the controller would have lowered the size. In an `env.txt`: `DM_FIXED_RESOLUTION=1`, `DM_FIXED_SCALE=0.75`.
+
+- **When to change it:** when the picture is soft because the controller sits at its floor, and a steady size matters more than a steady 60; with [Frame rate](#frame-rate) at 30 fps the top size usually holds.
+- **Cost:** GPU time, in proportion to the pixels: the controller no longer saves the frame rate.
+- **Found by:** Lichii's "Max Resolution" patch and Hookshot's fixed resolution (the same flag of the game's engine); only the facts were taken.
 
 ### Console mode
 
@@ -74,6 +82,14 @@ flowchart LR
 - **When to change it:** when the game falls short of its frame rate in busy scenes because of GPU time: Donkey Kong Bananza's upscaler is the largest single piece of a heavy frame on an M1 (3.5-5 ms of about 24 in handheld mode). Compare the look side by side before keeping it.
 - **Cost:** none in GPU time (it saves 2.5-4 ms a frame in that case); the picture is Apple's scaler's rather than the game's. Frames where the game renders at its output size are not upscaled and keep the game's shader either way. Devices without MetalFX keep the game's upscaler.
 - **Not the same as [Upscaling](#upscaling):** that one scales the finished picture, HUD included, to the screen; this one replaces the game's own step inside the frame. Both can be on.
+- **Skipped** leaves the network out altogether: its input is drawn bilinearly into its output, so the picture is softer, with none of the network's sharpening or anti-aliasing (what some emulators offer as a bypass). In an `env.txt`: `DM_UPSCALER=off`. Add [Sharpening](#sharpening) to taste.
+
+### Sharpening
+
+Shown with [Game's upscaler](#games-upscaler). A slider from 0 (the default, none) to 100 %: contrast-adaptive sharpening (AMD's CAS, on the four neighbours of each pixel) of the picture **MetalFX** or **Skipped** leaves, applied as it is drawn into the game's image. It does nothing with **Game's own**, whose network sharpens in its own way. In an `env.txt`: `DM_SHARPEN=0.5` (0 to 1).
+
+- **When to change it:** when MetalFX's or the skipped picture looks too soft next to the game's own, or when the game's own looks over-sharpened: **Skipped** with a little sharpening is the middle ground.
+- **Cost:** one more full-screen draw at the output size, well under a millisecond on an M1.
 
 ### Game language
 

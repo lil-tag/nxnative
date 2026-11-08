@@ -109,6 +109,31 @@ def fmz_rule(key, msl):
     if not n1 + n2: print(f'[RED] {key}: no scalar product found, FMZ rule has nothing to change', file=sys.stderr)
     return msl
 
+# A fragment shader that compares its own depth with what the same surface stored: Metal's [[position]].z and the depth the rasterizer stores are not one value. On an M4 Max position.z is one ULP
+# above the stored depth on some pixels and never below (2.55 % of 552,671 pixels in t_frag_z; other GPUs not measured). The Switch GPU evidently gives equal values, since games rely on it: The Legend of
+# Zelda: Ocarina of Time draws its ground mist after a mesh depth pre-pass and discards when z > stored (5ad65c0eefd09c7f), which left black specks, often in pairs, through the mist. So the two
+# comparisons whose answer such a pixel changes, z > x (it must fail) and its negation z <= x (it must pass), take z one ULP down, and so do their mirrors x < z and x >= z. z >= x and z < x stay:
+# position.z never being below the stored depth, they already give the answer, and one ULP down would turn it. z of 0 stays 0: position.z is never below the stored depth, so the stored depth is 0
+# too and both comparisons already give the answer (one ULP down from 0 would be a NaN). z is gl_FragCoord.z or a plain copy of it, also through a select with 0.0 (the translator's flush of a
+# denormal, x ? 0.0 : z). Not reached: z scaled before the comparison (40 more of that game's shaders multiply z by a constant first; the one read is a depth fade against a sampled depth
+# times the same constant), a comparison other than two variables into a bool, == and != (none in that game), and the Vulkan and GL routes (vk_shaders.py, gl_shaders.py).
+def frag_z(msl):
+    if 'gl_FragCoord.z' not in msl: return msl
+    z = set(re.findall(r'float (_\d+) = gl_FragCoord\.z;', msl))
+    n = -1
+    while n != len(z):
+        n = len(z)
+        for m in re.finditer(r'float (_\d+) = (?:_\d+ \? 0\.0 : )?(_\d+);', msl):
+            if m.group(2) in z: z.add(m.group(1))
+    down = lambda v: f'as_type<float>(as_type<uint>({v}) - uint({v} > 0.0))'
+    def one(m):
+        a, op, b = m.group(2), m.group(3), m.group(4)
+        if op in ('>', '<=') and a in z and b not in z: a = down(a)
+        elif op in ('<', '>=') and b in z and a not in z: b = down(b)
+        else: return m.group(0)
+        return f'bool {m.group(1)} = {a} {op} {b};'
+    return re.sub(r'bool (_\d+) = (_\d+) (>=|<=|>|<) (_\d+);', one, msl)
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -193,6 +218,11 @@ def hmma_msl(msl):
     v = dict(zip(HMMA_ARGS, [name(x) for x in plain]), scr=name(scr[0]), dt=group1(r'thread (\w+)&', plain[-1], re.match), rt=m.group(1))
     body_end = block_end(msl, m.end() - 1)
     # The calls, and the functions they are in: where each opens its body (a brace at the start of a line), and the shared memory array it declares besides the scratch.
+    # A function's end is found once (ends): a network's function holds hundreds of calls in up to 1.8 MB of MSL, and a scan per call took Ocarina of Time's 71 HMMA shaders 578 s of one core
+    calls, callers, ends = [], {}, {}
+    for c in HMMA_CALL.finditer(msl):
+        if m.start() <= c.start() <= body_end: continue
+        open_at = msl.rfind('\n{\n', 0, c.start()) + 1
     # A function's opening and end are found once (opens, ends): a network's function holds hundreds of calls in up to 1.8 MB of MSL, and a scan per call took Ocarina of Time's 71 HMMA
     # shaders 578 s of one core. A call's function opens at the last line holding only a brace that ends before the call (overlapping ones included, as rfind would find them)
     opens = [o.start() for o in FUNC_OPEN.finditer(msl)]
@@ -1139,6 +1169,7 @@ def reflect(key, stage, msl, res):
             off = b['cb_offset'] * 4 if b and b['cb_slot'] == 0 else None
             if b and b['cb_slot'] == abi.GMEM_MAP_CB_SLOT:   # not a game buffer: for addresses traced to no storage buffer, the host's pool table (offset 0) or the write log (DMSH_GMEM_LOG_CB_OFFSET)
                 if b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET: e.update(kind=abi.KIND_GMEM_LOG, rw=True); continue
+                if b['cb_offset'] == abi.GPTR_CB_OFFSET: e.update(kind=abi.KIND_GPTR, rw=False, sites=gptr_sites(stage, res)); continue
                 # rw: one of those accesses writes (the translator notes each one with its operation: Load, Store or an atomic)
                 e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
@@ -1148,6 +1179,23 @@ def reflect(key, stage, msl, res):
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
     return binds
+
+_GPTR_SITE = re.compile(r'translator: gptr site (\d+): c(\d+)\[(\d+)\] \+(\d+)$')
+
+def gptr_sites(stage, res):
+    """The shader's bind-time pointer sites (dmsh_abi.h DMSH_GPTR_*), in site order: [NVN storage buffer slot, byte offset of the pointer word]. A site whose storage buffer
+    the host does not take by slot (its address in no c0 storage buffer row) gets slot -1: the host leaves its entry empty and the shader searches the table"""
+    sites = {}
+    base = SSBO.get(stage)
+    for n in res.get('notes', ()):
+        m = _GPTR_SITE.match(n)
+        if not m: continue
+        k, cb_slot, cb_word, byte = map(int, m.groups())
+        off = cb_word * 4
+        reg = (off - base) // abi.C0_ROW if cb_slot == 0 and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else -1
+        sites[k] = [reg, byte]
+    if sorted(sites) != list(range(len(sites))) or len(sites) > abi.GPTR_MAX: raise ValueError(f'gptr sites {sorted(sites)} are not 0..n-1 within {abi.GPTR_MAX}')
+    return [sites[k] for k in range(len(sites))]
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer
@@ -1634,6 +1682,7 @@ def finish(key, w, j, c1):
     try: src = dmsh_atomic.check_msl(src)
     except ValueError as e: return 'image atomic MSL failed', str(e), None
     src = precise(src)   # min / max / clamp with Maxwell's NaN results (see precise)
+    if j['stage'] == 'ps': src = frag_z(src)   # position.z against the depth the same surface stored (see frag_z)
     try: src = gather_offsets(src)   # four gathers instead of a wrapper's loop over their offsets (see gather_offsets)
     except ValueError as e: return 'gather offsets rewrite failed', str(e)[:160], None
     try: src = hmma_msl(src)   # Ampere HMMA through simdgroup_matrix (see hmma_msl)

@@ -579,6 +579,15 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
 - (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+// Window > Metal HUD (cmd-shift-H): Apple's performance HUD shown or hidden on this layer alone, whatever MTL_HUD_ENABLED says. developerHUDProperties with
+// mode=default shows it (and enables it when the environment did not), an empty dictionary hides it; nil would hand the choice back to the environment
+- (void)toggleMetalHUD:(id)sender {
+    (void)sender;
+    int on = g_layer.developerHUDProperties ? [g_layer.developerHUDProperties[@"mode"] isEqual:@"default"]
+                                            : getenv("MTL_HUD_ENABLED") && atoi(getenv("MTL_HUD_ENABLED"));
+    g_layer.developerHUDProperties = on ? @{} : @{@"mode": @"default"};
+    LOG("front end: Metal performance HUD %s (Window > Metal HUD)", on ? "hidden" : "shown");
+}
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1537,7 +1546,7 @@ void front_run(void (*guest)(void)) {
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
-        // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
+        // stay unset until Window > Metal HUD (cmd-shift-H, DmGameView toggleMetalHUD) is used: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         { const char *fc = getenv("DM_SHOW_FPS"); if (fc && atoi(fc)) fps_counter_add(v); }
@@ -1574,6 +1583,8 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Game" action:nil keyEquivalent:@""] setSubmenu:gm];
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        NSMenuItem *hud = [wm addItemWithTitle:@"Metal HUD" action:@selector(toggleMetalHUD:) keyEquivalent:@"h"];   // cmd-shift-H; the game view is not a responder, so the target is explicit
+        hud.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift; hud.target = v;
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
@@ -1717,9 +1728,21 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     return 1;
 }
 
+// GPU lost (front.h): macOS runs none of the game's GPU work any more and nothing is drawn again. In full screen the frozen game held the whole screen (#1326: WindowServer froze for 40 s
+// and its watchdog killed it), so the window leaves full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits with exit status 70
+// (EX_SOFTWARE), so a launcher or script that runs it sees a failed run: exit() runs the same atexit handlers as ⌘Q's terminate (the one will-terminate
+// observer, haptics_apple.m's, is an atexit handler too), whose exit status is 0
+static void front_stop_alert(NSString *title, NSString *text, int status);
+void front_gpu_lost(void) {
+    if (!g_layer) die("GPU access revoked: macOS runs none of this process's GPU work any more");
+    LOG("front end: the GPU no longer runs the game's work; telling the player and quitting");
+    front_stop_alert([@"The GPU stopped running " stringByAppendingString:@(DM_GAME_NAME)],   // @(): the name is UTF-8, which %s would not read as such
+                     [NSString stringWithFormat:@"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. "
+                                                 "Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", @(DM_GAME_ID)], 70);
+}
 // The game stops over a GPU problem. A stopped game in full screen holds the whole screen (GitHub issue #1326: WindowServer froze for 40 s and its watchdog killed it), so the window leaves
-// full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits: as ⌘Q does with status 0, else through exit() with that status, which runs the same atexit
-// handlers as ⌘Q's terminate (the one will-terminate observer, haptics_apple.m's, is an atexit handler too). Any thread
+// full screen first and the alert comes once it has, or after 3 s if it has not. Then the app quits: with the exit status given (front_gpu_lost: 70, EX_SOFTWARE, so a launcher or script
+// sees a failed run) or, at 0, as cmd-Q does (the memory stop), so the launcher's work after the game runs. Any thread
 static void front_stop_alert(NSString *title, NSString *text, int status) {
     dispatch_async(dispatch_get_main_queue(), ^{
         __block int told = 0;
@@ -1734,8 +1757,7 @@ static void front_stop_alert(NSString *title, NSString *text, int status) {
             [NSApp activateIgnoringOtherApps:YES];
             [a layout]; NSWindow *game = g_win; if (game && a.window.level <= game.level) a.window.level = game.level + 1;
             [a runModal];
-            if (status) exit(status);
-            [NSApp terminate:nil];   // as ⌘Q
+            if (status) exit(status); else [NSApp terminate:nil];   // as cmd-Q
         };
         NSWindow *win = g_win;
         if (!(win.styleMask & NSWindowStyleMaskFullScreen)) { tell(); return; }
@@ -1743,14 +1765,6 @@ static void front_stop_alert(NSString *title, NSString *text, int status) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), tell);
         [win toggleFullScreen:nil];
     });
-}
-// GPU lost (front.h): macOS runs none of the game's GPU work any more and nothing is drawn again. Exit status 70 (EX_SOFTWARE), so a launcher or script that runs it sees a failed run
-void front_gpu_lost(void) {
-    if (!g_layer) die("GPU access revoked: macOS runs none of this process's GPU work any more");
-    LOG("front end: the GPU no longer runs the game's work; telling the player and quitting");
-    front_stop_alert([@"The GPU stopped running " stringByAppendingString:@(DM_GAME_NAME)],   // @(): the name is UTF-8, which %s would not read as such
-                     [NSString stringWithFormat:@"After a GPU error, macOS stopped running the game's GPU work, so nothing more can be drawn and the game quits. The log has the details. "
-                                                           "Please report it on GitHub with python3 scripts/bug_report.py %@, which collects the log.", @(DM_GAME_ID)], 70);
 }
 // GPU memory nearly full (front.h). The gate first, off the calling thread: dm_gfx_suspend waits for the submission in progress, which may be the caller, and no more GPU work may grow what is held
 void front_gpu_memory_stop(unsigned long long used_mb, unsigned long long limit_mb) {

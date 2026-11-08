@@ -75,6 +75,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             private readonly Dictionary<LsKey, Dictionary<uint, SearchResult>> _sharedEntries;
             private readonly HelperFunctionManager _hfm;
 
+            // nxnative: the raw global memory load helpers (TryGenerateRawStorageOp) by function id, their variants that take a pool resolved once for a run of loads
+            // (ResolveRawRuns), and the helper that resolves a run's range
+            public readonly Dictionary<int, StorageKind> RawLoadFunctions = new();
+            public readonly Dictionary<StorageKind, int> ResolvedLoadFunctions = new();
+            public int ResolveRangeFunction = -1;
+
+            public int AddHelper(Function function)
+            {
+                return _hfm.AddFunction(function);
+            }
+
             public GtsContext(HelperFunctionManager hfm)
             {
                 _entries = [];
@@ -289,6 +300,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     }
                 }
             }
+
+            ResolveRawRuns(gtsContext, resourceManager, gpuAccessor, blocks);
         }
 
         private static bool IsGlobalMemory(StorageKind storageKind)
@@ -394,7 +407,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     block,
                     operation,
                     out int functionId,
-                    out bool raw))
+                out Operand site,
+                out bool raw))
                 {
                     return null;
                 }
@@ -406,22 +420,22 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     operation.GlobalVectorWord == 0 &&
                     TryGetRawVectorFunction(gtsContext, resourceManager, gpuAccessor, operation, out int vectorFunctionId))
                 {
-                    return GenerateRawVectorLoad(resourceManager, node, operation, vectorFunctionId);
+                    return GenerateRawVectorLoad(resourceManager, node, operation, vectorFunctionId, site);   // nxnative: with the load's bind-time site (#1585), as the word helpers take it
                 }
 
-                return GenerateCallStorageOp(node, operation, null, functionId);
+                return GenerateCallStorageOp(node, operation, null, functionId, site);
             }
         }
 
         // nxnative: the first word of a 64- or 128-bit global load whose address goes through the pool table (Operation.GlobalVectorCount) calls the vector helper, which leaves
         // the other words in the shader's gmem_vec local memory; the loads of those words, which follow in the block, read them from there right after the call. A word whose
         // load is gone (unused) is not read. The scan stops at any other memory access or call, so nothing writes gmem_vec in between
-        private static LinkedListNode<INode> GenerateRawVectorLoad(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId)
+        private static LinkedListNode<INode> GenerateRawVectorLoad(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId, Operand site = null)
         {
             int count = operation.GlobalVectorCount;
             int vectorMemoryId = resourceManager.GetRawVectorMemory();
 
-            node = GenerateCallStorageOp(node, operation, null, functionId);   // the first word's load, now a copy of the call's result
+            node = GenerateCallStorageOp(node, operation, null, functionId, site);   // the first word's load, now a copy of the call's result
 
             LinkedListNode<INode> insertAfter = node;
 
@@ -485,7 +499,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return true;
             }
 
-            return TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId, count);
+            return TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId, vectorCount: count);
         }
 
         private static bool CanUseInlineStorageOp(Operation operation, TargetLanguage targetLanguage)
@@ -547,11 +561,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return newNode;
         }
 
-        private static LinkedListNode<INode> GenerateCallStorageOp(LinkedListNode<INode> node, Operation operation, Operand offset, int functionId)
+        private static LinkedListNode<INode> GenerateCallStorageOp(LinkedListNode<INode> node, Operation operation, Operand offset, int functionId, Operand site = null)
         {
             // Generate call to a helper function that will perform the storage buffer operation.
 
-            Operand[] sources = new Operand[operation.SourcesCount - 1 + (offset == null ? 2 : 1)];
+            Operand[] sources = new Operand[operation.SourcesCount - 1 + (offset == null ? 2 : 1) + (site != null ? 1 : 0)];
+
+            if (site != null)
+            {
+                sources[^1] = site;   // nxnative: a raw load's bind-time pointer site (its last argument, TryGenerateRawStorageOp)
+            }
 
             sources[0] = Const(functionId);
 
@@ -688,8 +707,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             BasicBlock block,
             Operation operation,
             out int functionId,
+            out Operand site,
             out bool raw)
         {
+            site = null;
             Queue<PhiNode> phis = new();
             HashSet<PhiNode> visited = [];
             List<uint> targetCbs = [];
@@ -756,6 +777,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             if (targetCbs.Count == 0)
             {
                 gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" traced to no storage buffer: it goes through the memory pool table.");
+
+                if (operation.Inst == Instruction.Load)
+                {
+                    site = Const(FindPointerSite(resourceManager, gpuAccessor, operation));
+                }
             }
 
             raw = targetCbs.Count == 0;
@@ -894,6 +920,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // that writes a whole frame costs a load, not an atomic (Ocarina of Time's movie compute ran at 41 ms a frame on a hash set of pages, which also ran out of slots)
         private const int GmemLogCbOffset = 1;
 
+        // nxnative: bind-time pointer sites (dmsh_abi.h DMSH_GPTR_*): a storage buffer of entries laid out as the table's, one per site, under the same sentinel slot
+        private const int GptrCbOffset = 2;
+        private const int GptrMax = 64;
+
         // nxnative: a global memory access whose address the search traced to no storage buffer, an address the shader loaded from memory (Donkey Kong Bananza: gsys's vertex
         // shader that resets the terrain's indirect draw records reads each record's address from a storage buffer). Ryujinx drops such an access (a load reads 0). Here it
         // goes to the address itself: a tagged hint for its 2 MiB chunk, else a branchless binary search, finds the host's pool holding it, the address moves by that pool's delta (its Metal GPU address minus its
@@ -904,6 +934,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             IGpuAccessor gpuAccessor,
             Operation operation,
             out int functionId,
+            bool resolved = false,
             int vectorCount = 1)
         {
             functionId = 0;
@@ -929,9 +960,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return false;
             }
 
+            // A load takes its bind-time pointer site as a third argument (-1: none): the entry the host filled for it is tried before the table
+            bool isLoad = operation.Inst == Instruction.Load;
+            int siteBinding = 0;
+
+            if (isLoad && !resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, GptrCbOffset, write: false, out siteBinding))
+            {
+                return false;
+            }
+
             resourceManager.Properties.UsesPhysicalPointers = true;
 
-            int inArgumentsCount = 2;
+            int inArgumentsCount = isLoad ? 3 : 2;
 
             if (operation.Inst == Instruction.AtomicCompareAndSwap)
             {
@@ -940,6 +980,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             else if (operation.Inst == Instruction.Store || operation.Inst.IsAtomic())
             {
                 inArgumentsCount = 3;
+            }
+
+            if (resolved)
+            {
+                inArgumentsCount = 6;   // the address, the bind-time site (#1585), then the run's entry (0: none holds the whole run) and its delta (ResolveRawRuns)
             }
 
             EmitterContext context = new();
@@ -966,9 +1011,43 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     context.BitwiseAnd(context.ICompareEqual(addrHigh, high), context.ICompareLessUnsigned(addrLow, low)));
             }
 
+            // A load of a run whose pool was resolved once (ResolveRawRuns) moves by that pool's delta; a run no single entry holds takes the lookup below
+            if (resolved)
+            {
+                Operand lblLookup = Label();
+                context.BranchIfFalse(lblLookup, context.ICompareNotEqual(Argument(3), Const(0)));
+                EmitAccess(Argument(4), Argument(5));
+                context.MarkLabel(lblLookup);
+            }
+
             Operand selected = Local();
             Operand lblFound = Label();
             Operand lblChosen = Label();
+
+            // The delta of the pool holding the address: from the load's bind-time pointer site when the address is inside the entry the host filled for it, else from the table
+            Operand deltaLow = Local();
+            Operand deltaHigh = Local();
+            Operand lblAccess = Label();
+
+            if (isLoad)
+            {
+                Operand site = Argument(2);
+                Operand lblNoSite = Label();
+                context.BranchIfFalse(lblNoSite, context.ICompareNotEqual(site, Const(-1)));
+
+                Operand siteEntry = context.IMultiply(site, Const(GmemMapEntryWords));
+
+                Operand SiteWord(int word)
+                {
+                    return context.Load(StorageKind.StorageBuffer, siteBinding, Const(0), context.IAdd(siteEntry, Const(word)));
+                }
+
+                context.BranchIfFalse(lblNoSite, context.BitwiseAnd(AtOrBelow(SiteWord(1), SiteWord(0)), Below(SiteWord(3), SiteWord(2))));
+                context.Copy(deltaLow, SiteWord(4));
+                context.Copy(deltaHigh, SiteWord(5));
+                context.Branch(lblAccess);
+                context.MarkLabel(lblNoSite);
+            }
 
             // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
             // choose the entry the first one chose (Ocarina of Time's foliage mesh shader 73dc0b90c4082e43, 135 reads, took 10.9 ms of a 683x384 frame). The table's ranges are disjoint
@@ -992,14 +1071,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             context.BranchIfTrue(lblFound, hintFits);
 
             // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
-            Operand index = Const(0);
-
-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
-            {
-                Operand candidate = context.IAdd(index, Const(step));
-                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
-                index = context.ConditionalSelect(AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)), candidate, index);
-            }
+            Operand index = EmitTableSearch(context, entry => AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)));
 
             context.Copy(selected, index);
             context.MarkLabel(lblFound);
@@ -1023,82 +1095,21 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 context.MarkLabel(lblLogged);
             }
 
-            // A small integer is read or written in its 32-bit word
-            Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
-            Operand hostLow = context.IAdd(wordLow, MapWord(found, 4));
-            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
-            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, MapWord(found, 5)), carry);
+            context.Copy(deltaLow, MapWord(found, 4));
+            context.Copy(deltaHigh, MapWord(found, 5));
+            context.MarkLabel(lblAccess);   // the bind-time site's path (#1585) arrives here with the delta already copied
+            EmitAccess(deltaLow, deltaHigh);
 
-            Operand resultValue = null;
+            context.MarkLabel(lblSkip);
 
             if (operation.Inst == Instruction.Load && vectorCount > 1)
             {
-                // All the words of a 64- or 128-bit load in one vector load (ReplaceGlobalMemoryWithStorage, GenerateRawVectorLoad): word 0 returned, the others left in gmem_vec.
-                // The first word's entry holds them all: such a load is aligned to its size on the GPU, and every entry starts and ends on a pool's 4 KiB boundary
-                // (nvn_mtl.m gmem_map). Ocarina of Time's foliage mesh shaders read 464 of their 506 raw words as 116 such loads, which Metal's compiler kept as four word
-                // loads each, every one through a pointer of its own: one vector load each (first as an overlay of those shaders) took the frame's GPU time from 17.0 to
-                // 13.9 ms on an M4 Pro (docs/reference/shaders.md, 128-bit raw global loads read one word at a time)
-                resultValue = context.Add(Instruction.Load, StorageKind.GlobalMemoryVector, Local(), hostLow, hostHigh, Const(vectorCount), Const(resourceManager.GetRawVectorMemory()));
-            }
-            else if (operation.Inst == Instruction.Load)
-            {
-                resultValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
-
-                if (isSmall)
+                // A miss reads 0 in every word of a vector load, as the word loads it replaces did: gmem_vec has no initial value, and the caller reads its words after the call (#1813)
+                for (int k = 0; k < vectorCount - 1; k++)
                 {
-                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
-
-                    resultValue = operation.StorageKind switch
-                    {
-                        StorageKind.GlobalMemoryS8 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(8)),
-                        StorageKind.GlobalMemoryS16 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(16)),
-                        StorageKind.GlobalMemoryU8 => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(byte.MaxValue)),
-                        _ => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(ushort.MaxValue)),
-                    };
+                    context.Store(StorageKind.LocalMemory, resourceManager.GetRawVectorMemory(), Const(k), Const(0));
                 }
             }
-            else if (operation.Inst == Instruction.Store)
-            {
-                Operand value = Argument(2);
-
-                if (isSmall)
-                {
-                    int bitSize = operation.StorageKind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 ? 8 : 16;
-                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
-
-                    Operand lblLoopHead = Label();
-                    context.MarkLabel(lblLoopHead);
-
-                    Operand oldValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
-                    Operand newValue = context.BitfieldInsert(oldValue, value, bitOffset, Const(bitSize));
-                    Operand casResult = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, oldValue, newValue);
-
-                    context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
-                }
-                else
-                {
-                    context.Store(StorageKind.GlobalMemory, hostLow, hostHigh, value);
-                }
-            }
-            else if (operation.Inst == Instruction.AtomicCompareAndSwap)
-            {
-                resultValue = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, Argument(2), Argument(3));
-            }
-            else
-            {
-                resultValue = context.Add(operation.Inst, StorageKind.GlobalMemory, Local(), hostLow, hostHigh, Argument(2));
-            }
-
-            if (resultValue != null)
-            {
-                context.Return(resultValue);
-            }
-            else
-            {
-                context.Return();
-            }
-
-            context.MarkLabel(lblSkip);
 
             bool returnsValue = operation.Dest != null;
 
@@ -1113,16 +1124,754 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Function function = new(
                 ControlFlowGraph.Create(context.GetOperations()).Blocks,
-                GetFunctionName(operation, isMultiTarget: true, []) + (vectorCount > 1 ? $"RawV{vectorCount}" : "Raw"),
+                GetFunctionName(operation, isMultiTarget: true, []) + (resolved ? "RawResolved" : vectorCount > 1 ? $"RawV{vectorCount}" : "Raw"),
                 returnsValue,
                 inArgumentsCount,
                 0);
 
-            functionId = vectorCount > 1
-                ? gtsContext.AddRawVectorFunction(vectorCount, function)
-                : gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+            if (vectorCount > 1)
+            {
+                functionId = gtsContext.AddRawVectorFunction(vectorCount, function);   // one helper per width, found again by TryGetRawVectorFunction
+            }
+            else if (resolved)
+            {
+                functionId = gtsContext.AddHelper(function);
+                gtsContext.ResolvedLoadFunctions[operation.StorageKind] = functionId;
+            }
+            else
+            {
+                functionId = gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+
+                if (operation.Inst == Instruction.Load)
+                {
+                    gtsContext.RawLoadFunctions[functionId] = operation.StorageKind;
+                }
+            }
 
             return true;
+
+            // The access at the address moved by a pool's delta (its Metal GPU address minus its guest address), and its return
+            void EmitAccess(Operand deltaLow, Operand deltaHigh)
+            {
+                // A small integer is read or written in its 32-bit word
+                Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
+                Operand hostLow = context.IAdd(wordLow, deltaLow);
+                Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
+                Operand hostHigh = context.IAdd(context.IAdd(addrHigh, deltaHigh), carry);
+
+                Operand resultValue = null;
+
+                if (operation.Inst == Instruction.Load && vectorCount > 1)
+                {
+                    // All the words of a 64- or 128-bit load in one vector load (ReplaceGlobalMemoryWithStorage, GenerateRawVectorLoad): word 0 returned, the others left in
+                    // gmem_vec. The first word's entry holds them all: such a load is aligned to its size on the GPU, and every entry starts and ends on a pool's 4 KiB boundary
+                    // (nvn_mtl.m gmem_map). Ocarina of Time's foliage mesh shaders read 464 of their 506 raw words as 116 such loads (docs/reference/shaders.md, 128-bit raw
+                    // global loads read one word at a time). The delta comes from the table, the bind-time site (#1585) or a resolved run (#1752) alike
+                    resultValue = context.Add(Instruction.Load, StorageKind.GlobalMemoryVector, Local(), hostLow, hostHigh, Const(vectorCount), Const(resourceManager.GetRawVectorMemory()));
+                }
+                else if (operation.Inst == Instruction.Load)
+                {
+                    resultValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
+
+                    if (isSmall)
+                    {
+                        Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
+
+                        resultValue = operation.StorageKind switch
+                        {
+                            StorageKind.GlobalMemoryS8 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(8)),
+                            StorageKind.GlobalMemoryS16 => context.BitfieldExtractS32(context.ShiftRightS32(resultValue, bitOffset), Const(0), Const(16)),
+                            StorageKind.GlobalMemoryU8 => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(byte.MaxValue)),
+                            _ => context.BitwiseAnd(context.ShiftRightU32(resultValue, bitOffset), Const(ushort.MaxValue)),
+                        };
+                    }
+                }
+                else if (operation.Inst == Instruction.Store)
+                {
+                    Operand value = Argument(2);
+
+                    if (isSmall)
+                    {
+                        int bitSize = operation.StorageKind is StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 ? 8 : 16;
+                        Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
+
+                        Operand lblLoopHead = Label();
+                        context.MarkLabel(lblLoopHead);
+
+                        Operand oldValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
+                        Operand newValue = context.BitfieldInsert(oldValue, value, bitOffset, Const(bitSize));
+                        Operand casResult = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, oldValue, newValue);
+
+                        context.BranchIfTrue(lblLoopHead, context.ICompareNotEqual(casResult, oldValue));
+                    }
+                    else
+                    {
+                        context.Store(StorageKind.GlobalMemory, hostLow, hostHigh, value);
+                    }
+                }
+                else if (operation.Inst == Instruction.AtomicCompareAndSwap)
+                {
+                    resultValue = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, hostLow, hostHigh, Argument(2), Argument(3));
+                }
+                else
+                {
+                    resultValue = context.Add(operation.Inst, StorageKind.GlobalMemory, Local(), hostLow, hostHigh, Argument(2));
+                }
+
+                if (resultValue != null)
+                {
+                    context.Return(resultValue);
+                }
+                else
+                {
+                    context.Return();
+                }
+            }
+        }
+
+        // nxnative: the binary search of the pool table as a loop of GmemMapLog2 steps: the last entry whose start passes startAtOrBelow (given an entry's first word). The search runs only
+        // when the last entry and the hint both missed, but unrolled it was 13 copies of the step at every call site once Metal inlines the helpers: Ocarina of Time's compute shaders
+        // 77e64b1d8200eac3 and d8abf8a34811f8c6 took 2.3 to 2.6 s each to become pipelines, and the 8 that its foliage's reaction to a sword needs froze the game for 11 s the first time
+        private static Operand EmitTableSearch(EmitterContext context, Func<Operand, Operand> startAtOrBelow)
+        {
+            Operand index = Local();
+            Operand step = Local();
+            Operand lblStep = Label();
+
+            context.Copy(index, Const(0));
+            context.Copy(step, Const(1 << (GmemMapLog2 - 1)));
+            context.MarkLabel(lblStep);
+
+            Operand candidate = context.IAdd(index, step);
+            context.Copy(index, context.ConditionalSelect(startAtOrBelow(context.IMultiply(candidate, Const(GmemMapEntryWords))), candidate, index));
+            context.Copy(step, context.ShiftRightU32(step, Const(1)));
+            context.BranchIfTrue(lblStep, context.ICompareNotEqual(step, Const(0)));
+
+            return index;
+        }
+
+        // nxnative: loads through one untraced pointer at constant offsets resolve its pool once. A shader that reads a structure word after word through a pointer it loaded (Ocarina of Time's
+        // colour-pass mesh shaders, 253 to 506 raw loads each, a pointer from a fixed word of a storage buffer and offsets +0, +4, +8 ...) paid each word the last-entry check, 4 table reads, and the
+        // delta's 2 more: about 7 memory reads per word of data, and nearly all of the 683x384 colour pass's 5.8 ms of mesh work. Here the loads of one base {low, high} (SSA values) at
+        // offsets c >= 0, as the decoder builds them (low = base low + c, high = base high + the carry of that add), are a run: at the nearest block that dominates all of them, one call looks up
+        // the entry holding the run's whole range [base + min c, base + max c + 4) and reads its delta, and each load moves by that delta. A run no single entry holds (it spans two pools, or an
+        // address in none, or a guard that leaves the pointer invalid) gives entry 0, and each of its loads takes the full lookup as before. The resolve only reads the table, so running it
+        // where a guarded load would not run is harmless. Stores and atomics keep the per-access path: the write log is per entry
+        private const int RawRunMinLoads = 2;
+        private const int RawRunMaxOffset = 1 << 24;
+
+        private readonly struct RawRunAccess
+        {
+            public readonly LinkedListNode<INode> Node;
+            public readonly BasicBlock Block;
+            public readonly Operand BaseLow;
+            public readonly Operand BaseHigh;
+            public readonly int Offset;
+
+            public RawRunAccess(LinkedListNode<INode> node, BasicBlock block, Operand baseLow, Operand baseHigh, int offset)
+            {
+                Node = node;
+                Block = block;
+                BaseLow = baseLow;
+                BaseHigh = baseHigh;
+                Offset = offset;
+            }
+        }
+
+        private static void ResolveRawRuns(GtsContext gtsContext, ResourceManager resourceManager, IGpuAccessor gpuAccessor, BasicBlock[] blocks)
+        {
+            if (gtsContext.RawLoadFunctions.Count == 0)
+            {
+                return;
+            }
+
+            // The runs in program order (first load first), keyed by the base's value (RawValueKey: the same SSA values, or the same pure operations of them), and where each node is
+            Dictionary<string, List<RawRunAccess>> runs = new();
+            List<string> order = [];
+            Dictionary<INode, BasicBlock> blockOf = new();
+            Dictionary<Operand, string> keys = new();
+
+            foreach (BasicBlock block in blocks)
+            {
+                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
+                {
+                    blockOf[node.Value] = block;
+
+                    if (node.Value is not Operation call ||
+                        call.Inst != Instruction.Call ||
+                        call.SourcesCount != 4 ||   // the function, the address's two words and the bind-time site (#1585)
+                        call.Dest == null ||
+                        call.GetSource(0).Type != OperandType.Constant ||
+                        !gtsContext.RawLoadFunctions.ContainsKey(call.GetSource(0).Value))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetRawBase(call.GetSource(1), call.GetSource(2), out Operand baseLow, out Operand baseHigh, out int offset))
+                    {
+                        continue;
+                    }
+
+                    string key = RawValueKey(baseLow, keys, RawKeyDepth) + "|" + RawValueKey(baseHigh, keys, RawKeyDepth);
+
+                    if (!runs.TryGetValue(key, out List<RawRunAccess> run))
+                    {
+                        runs.Add(key, run = []);
+                        order.Add(key);
+                    }
+
+                    run.Add(new RawRunAccess(node, block, baseLow, baseHigh, offset));
+                }
+            }
+
+            int mapBinding = -1;
+
+            foreach (string key in order)
+            {
+                List<RawRunAccess> run = runs[key];
+
+                if (run.Count < RawRunMinLoads)
+                {
+                    continue;
+                }
+
+                // The nearest block that dominates every load of the run
+                BasicBlock at = run[0].Block;
+
+                foreach (RawRunAccess access in run)
+                {
+                    at = NearestCommonDominator(at, access.Block);
+
+                    if (at == null)
+                    {
+                        break;
+                    }
+                }
+
+                if (at == null)
+                {
+                    continue;
+                }
+
+                if (mapBinding < 0)
+                {
+                    if (!resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, 0, write: false, out mapBinding) ||
+                        !TryGetResolveRangeFunction(gtsContext, resourceManager, out _))
+                    {
+                        return;
+                    }
+                }
+
+                int min = int.MaxValue, end = 0;
+
+                foreach (RawRunAccess access in run)
+                {
+                    min = Math.Min(min, access.Offset);
+                    end = Math.Max(end, access.Offset + 4);
+                }
+
+                // Before the run's first load in that block, else at its end (before its branch)
+                LinkedListNode<INode> before = null;
+
+                foreach (RawRunAccess access in run)
+                {
+                    if (access.Block == at)
+                    {
+                        before = access.Node;
+                        break;
+                    }
+                }
+
+                // A load's base whose value is defined there: one SSA value dominates all its uses, but loads that compute the same value each on their own may not
+                Operand baseLow = null, baseHigh = null;
+
+                foreach (RawRunAccess access in run)
+                {
+                    if (IsAvailableAt(access.BaseLow, at, before, blockOf) && IsAvailableAt(access.BaseHigh, at, before, blockOf))
+                    {
+                        (baseLow, baseHigh) = (access.BaseLow, access.BaseHigh);
+                        break;
+                    }
+                }
+
+                if (baseLow == null)
+                {
+                    continue;
+                }
+
+                EmitterContext context = new();
+
+                (Operand minLow, Operand minHigh) = AddOffset64(context, baseLow, baseHigh, min);
+                (Operand endLow, Operand endHigh) = AddOffset64(context, baseLow, baseHigh, end);
+                Operand entry = context.Call(gtsContext.ResolveRangeFunction, true, minLow, minHigh, endLow, endHigh);
+                Operand entryWord = context.IMultiply(entry, Const(GmemMapEntryWords));
+                Operand deltaLow = context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entryWord, Const(4)));
+                Operand deltaHigh = context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entryWord, Const(5)));
+
+                foreach (Operation op in context.GetOperations())
+                {
+                    if (before != null)
+                    {
+                        at.Operations.AddBefore(before, op);
+                    }
+                    else
+                    {
+                        at.Append(op);
+                    }
+                }
+
+                foreach (RawRunAccess access in run)
+                {
+                    Operation call = (Operation)access.Node.Value;
+                    StorageKind kind = gtsContext.RawLoadFunctions[call.GetSource(0).Value];
+
+                    if (!gtsContext.ResolvedLoadFunctions.TryGetValue(kind, out int resolvedId))
+                    {
+                        Operation model = new(Instruction.Load, kind, Local(), Const(0), Const(0));
+
+                        if (!TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, model, out resolvedId, resolved: true))
+                        {
+                            continue;
+                        }
+                    }
+
+                    call.SetSource(0, Const(resolvedId));
+                    call.AppendSources([entry, deltaLow, deltaHigh]);
+                }
+            }
+        }
+
+        // The base and constant offset of a raw load's address, as the decoder builds an address plus an offset (InstEmitAmpereMem.AGlobalAddress, InstEmitMemory.Get40BitsAddress):
+        // low = base low + c, high = base high + (low < base low ? 1 : 0), or the carry alone for a base high of 0. An address that is no such sum is its own base at offset 0
+        private static bool TryGetRawBase(Operand low, Operand high, out Operand baseLow, out Operand baseHigh, out int offset)
+        {
+            low = SkipCopies(low);
+            high = SkipCopies(high);
+
+            if (low.AsgOp is Operation add && add.Inst == Instruction.Add && add.SourcesCount == 2)
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    Operand c = add.GetSource(i), b = SkipCopies(add.GetSource(1 - i));
+
+                    if (c.Type != OperandType.Constant || c.Value <= 0 || c.Value >= RawRunMaxOffset || b.Type != OperandType.LocalVariable)
+                    {
+                        continue;
+                    }
+
+                    if (IsCarryOf(high, low, b))   // a high word of 0: the optimizer folded 0 + carry to the carry
+                    {
+                        baseLow = b;
+                        baseHigh = Const(0);
+                        offset = c.Value;
+
+                        return true;
+                    }
+
+                    if (high.AsgOp is Operation addHigh && addHigh.Inst == Instruction.Add && addHigh.SourcesCount == 2)
+                    {
+                        for (int j = 0; j < 2; j++)
+                        {
+                            if (IsCarryOf(addHigh.GetSource(j), low, b))
+                            {
+                                baseLow = b;
+                                baseHigh = SkipCopies(addHigh.GetSource(1 - j));
+                                offset = c.Value;
+
+                                return baseHigh.Type is OperandType.LocalVariable or OperandType.Constant;
+                            }
+                        }
+                    }
+                }
+            }
+
+            baseLow = low;
+            baseHigh = high;
+            offset = 0;
+
+            return low.Type == OperandType.LocalVariable && high.Type is OperandType.LocalVariable or OperandType.Constant;
+        }
+
+        // carry = (sum < base) ? 1 : 0
+        private static bool IsCarryOf(Operand carry, Operand sum, Operand baseLow)
+        {
+            if (SkipCopies(carry).AsgOp is not Operation select ||
+                select.Inst != Instruction.ConditionalSelect ||
+                select.SourcesCount != 3 ||
+                select.GetSource(1).Type != OperandType.Constant || select.GetSource(1).Value != 1 ||
+                select.GetSource(2).Type != OperandType.Constant || select.GetSource(2).Value != 0)
+            {
+                return false;
+            }
+
+            return SkipCopies(select.GetSource(0)).AsgOp is Operation compare &&
+                   compare.Inst == Instruction.CompareLessU32 &&
+                   compare.SourcesCount == 2 &&
+                   SkipCopies(compare.GetSource(0)) == sum &&
+                   SkipCopies(compare.GetSource(1)) == baseLow;
+        }
+
+        private const int RawKeyDepth = 6;
+
+        // A key equal for two operands that hold the same value in an invocation: the same SSA value or constant, or the same pure integer operation of such values (a decoder computes
+        // a pointer plus a uniform register again for each instruction). Anything else, a memory load among them, is keyed by its own identity
+        private static string RawValueKey(Operand operand, Dictionary<Operand, string> keys, int depth)
+        {
+            operand = SkipCopies(operand);
+
+            if (operand.Type == OperandType.Constant)
+            {
+                return "#" + operand.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (keys.TryGetValue(operand, out string known))
+            {
+                return known;
+            }
+
+            string key;
+
+            if (depth > 0 && operand.AsgOp is Operation op && op.Dest == operand && op.DestsCount == 1 && op.SourcesCount is >= 1 and <= 3 && IsPureInteger(op.Inst))
+            {
+                string[] sources = new string[op.SourcesCount];
+
+                for (int i = 0; i < sources.Length; i++)
+                {
+                    sources[i] = RawValueKey(op.GetSource(i), keys, depth - 1);
+                }
+
+                if (op.Inst is Instruction.Add or Instruction.BitwiseAnd or Instruction.BitwiseOr or Instruction.BitwiseExclusiveOr or Instruction.CompareEqual or Instruction.CompareNotEqual)
+                {
+                    Array.Sort(sources, StringComparer.Ordinal);
+                }
+
+                key = op.Inst.ToString() + "(" + string.Join(",", sources) + ")";
+            }
+            else
+            {
+                key = "v" + keys.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            keys[operand] = key;
+
+            return key;
+        }
+
+        private static bool IsPureInteger(Instruction inst)
+        {
+            return inst is Instruction.Add or Instruction.Subtract or Instruction.Multiply or Instruction.ConditionalSelect or
+                Instruction.CompareLessU32 or Instruction.CompareEqual or Instruction.CompareNotEqual or
+                Instruction.BitwiseAnd or Instruction.BitwiseOr or Instruction.BitwiseExclusiveOr or Instruction.BitwiseNot or
+                Instruction.ShiftLeft or Instruction.ShiftRightU32 or Instruction.ShiftRightS32;
+        }
+
+        // The operand's value exists at the insertion point: before node in block, or at block's end when node is null
+        private static bool IsAvailableAt(Operand operand, BasicBlock block, LinkedListNode<INode> node, Dictionary<INode, BasicBlock> blockOf)
+        {
+            if (operand.Type == OperandType.Constant)
+            {
+                return true;
+            }
+
+            if (operand.Type != OperandType.LocalVariable || operand.AsgOp == null || !blockOf.TryGetValue(operand.AsgOp, out BasicBlock defBlock))
+            {
+                return false;
+            }
+
+            if (defBlock != block)
+            {
+                for (BasicBlock x = block.ImmediateDominator; x != null; x = x.ImmediateDominator == x ? null : x.ImmediateDominator)
+                {
+                    if (x == defBlock)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (node == null)
+            {
+                return true;
+            }
+
+            for (LinkedListNode<INode> n = node.Previous; n != null; n = n.Previous)
+            {
+                if (n.Value == operand.AsgOp)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static Operand SkipCopies(Operand operand)
+        {
+            while (operand.AsgOp is Operation copy && copy.Inst == Instruction.Copy && copy.SourcesCount == 1)
+            {
+                operand = copy.GetSource(0);
+            }
+
+            return operand;
+        }
+
+        private static (Operand, Operand) AddOffset64(EmitterContext context, Operand low, Operand high, int offset)
+        {
+            if (offset == 0)
+            {
+                return (low, high);
+            }
+
+            Operand sum = context.IAdd(low, Const(offset));
+            Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(sum, low), Const(1), Const(0));
+
+            return (sum, context.IAdd(high, carry));
+        }
+
+        private static BasicBlock NearestCommonDominator(BasicBlock a, BasicBlock b)
+        {
+            HashSet<BasicBlock> above = [];
+
+            for (BasicBlock x = a; x != null; x = x.ImmediateDominator == x ? null : x.ImmediateDominator)
+            {
+                above.Add(x);
+            }
+
+            for (BasicBlock y = b; y != null; y = y.ImmediateDominator == y ? null : y.ImmediateDominator)
+            {
+                if (above.Contains(y))
+                {
+                    return y;
+                }
+            }
+
+            return null;
+        }
+
+        // The entry of the pool table that holds a whole range [min, end): the entry this helper chose last in this invocation, else the hint of min's 2 MiB chunk, else the last entry
+        // starting at or below min, if that entry also reaches end; else 0. A shader that loads its pointers again in each guarded block resolves the same pointer many times
+        // (Ocarina of Time's colour-pass mesh shaders: 122 runs through 5 pointers), and all but the first take the remembered entry
+        private static bool TryGetResolveRangeFunction(GtsContext gtsContext, ResourceManager resourceManager, out int functionId)
+        {
+            functionId = gtsContext.ResolveRangeFunction;
+
+            if (functionId >= 0)
+            {
+                return true;
+            }
+
+            if (!resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, 0, write: false, out int mapBinding))
+            {
+                return false;
+            }
+
+            resourceManager.Properties.UsesPhysicalPointers = true;
+
+            EmitterContext context = new();
+
+            Operand minLow = Argument(0);
+            Operand minHigh = Argument(1);
+            Operand endLow = Argument(2);
+            Operand endHigh = Argument(3);
+
+            Operand MapWord(Operand entry, int word)
+            {
+                return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
+            }
+
+            Operand NotAbove(Operand aHigh, Operand aLow, Operand bHigh, Operand bLow)   // {aLow, aHigh} <= {bLow, bHigh}
+            {
+                return context.BitwiseOr(
+                    context.ICompareLessUnsigned(aHigh, bHigh),
+                    context.BitwiseAnd(context.ICompareEqual(aHigh, bHigh), context.ICompareLessOrEqualUnsigned(aLow, bLow)));
+            }
+
+            Operand Holds(Operand index)
+            {
+                Operand found = context.IMultiply(index, Const(GmemMapEntryWords));
+
+                return context.BitwiseAnd(
+                    context.ICompareNotEqual(index, Const(0)),
+                    context.BitwiseAnd(
+                        NotAbove(MapWord(found, 1), MapWord(found, 0), minHigh, minLow),
+                        NotAbove(endHigh, endLow, MapWord(found, 3), MapWord(found, 2))));
+            }
+
+            int lastBinding = resourceManager.AddRawLastEntryMemory();
+            Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
+            Operand lblMiss = Label();
+            context.BranchIfFalse(lblMiss, Holds(last));
+            context.Return(last);
+            context.MarkLabel(lblMiss);
+
+            Operand selected = Local();
+            Operand lblFound = Label();
+
+            Operand chunk = context.BitwiseOr(context.ShiftLeft(minHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(minLow, Const(GmemHintShift)));
+            Operand indexMask = Const((1 << GmemMapLog2) - 1);
+            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
+            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
+            Operand hintFits = context.BitwiseAnd(
+                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
+                context.ICompareLessUnsigned(minHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+            context.Copy(selected, hintIndex);
+            context.BranchIfTrue(lblFound, hintFits);
+
+            Operand index = EmitTableSearch(context, entry => NotAbove(MapWord(entry, 1), MapWord(entry, 0), minHigh, minLow));
+
+            context.Copy(selected, index);
+            context.MarkLabel(lblFound);
+
+            Operand lblNone = Label();
+            context.BranchIfFalse(lblNone, Holds(selected));
+            context.Store(StorageKind.LocalMemory, lastBinding, selected);
+            context.Return(selected);
+            context.MarkLabel(lblNone);
+            context.Return(Const(0));
+
+            Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, "RawResolveRange", true, 4, 0);
+
+            functionId = gtsContext.ResolveRangeFunction = gtsContext.AddHelper(function);
+
+            return true;
+        }
+
+        // nxnative: a raw load's bind-time pointer site. Ocarina of Time's model shaders read five pointers at bytes 0-0x20 of storage slot 1 and load through each plus an index;
+        // 99.5% of its raw-table accesses (2,173 shaders) have that form. The address's low word is the sum of a storage buffer word at a constant offset and index terms, and its high
+        // word holds the next word of the same buffer: that pair is the pointer. When the high word names no such word, a single candidate in the low word is taken: the host's entry
+        // only ever speeds up the lookup (the shader still checks the address against it), so a wrong guess costs a search, not a wrong read. Returns the site number, or -1
+        private static int FindPointerSite(ResourceManager resourceManager, IGpuAccessor gpuAccessor, Operation operation)
+        {
+            List<(int, int)> low = [];
+            List<(int, int)> high = [];
+            CollectPointerWords(operation.GetSource(0), 0, low, []);
+            CollectPointerWords(operation.GetSource(1), 0, high, []);
+
+            (int, int)? pick = null;
+
+            foreach ((int binding, int word) in low)
+            {
+                if (high.Contains((binding, word + 1)))
+                {
+                    if (pick != null && pick != (binding, word))
+                    {
+                        return -1;   // two pointers summed: none is the base
+                    }
+
+                    pick = (binding, word);
+                }
+            }
+
+            if (pick == null && low.Count == 1)
+            {
+                pick = low[0];
+            }
+
+            if (pick is not (int pb, int pw) || !resourceManager.TryGetStorageBufferDescriptor(pb, out int cbSlot, out int cbOffset))
+            {
+                return -1;
+            }
+
+            var key = (cbSlot, cbOffset, pw * 4);
+
+            if (!resourceManager.PointerSites.TryGetValue(key, out int site))
+            {
+                if (resourceManager.PointerSites.Count >= GptrMax)
+                {
+                    return -1;
+                }
+
+                site = resourceManager.PointerSites.Count;
+                resourceManager.PointerSites.Add(key, site);
+                gpuAccessor.Log($"gptr site {site}: c{cbSlot}[{cbOffset}] +{pw * 4}");
+            }
+
+            return site;
+        }
+
+        // The storage buffer words at constant offsets an address word is summed from: (binding, word offset), through copies, adds, ORs and masks
+        private static void CollectPointerWords(Operand op, int depth, List<(int, int)> words, HashSet<INode> seen)
+        {
+            if (op == null || op.Type != OperandType.LocalVariable || depth > 16 || op.AsgOp is not Operation o || !seen.Add(o))
+            {
+                return;
+            }
+
+            switch (o.Inst)
+            {
+                case Instruction.Load:
+                    if (o.StorageKind == StorageKind.StorageBuffer && o.SourcesCount == 3 && o.GetSource(0).Type == OperandType.Constant)
+                    {
+                        long? word = ConstValue(o.GetSource(2), 0);
+
+                        if (word is long w && w >= 0 && !words.Contains((o.GetSource(0).Value, (int)w)))
+                        {
+                            words.Add((o.GetSource(0).Value, (int)w));
+                        }
+                    }
+
+                    return;
+                case Instruction.Copy:
+                case Instruction.Add:
+                case Instruction.BitwiseOr:
+                    for (int i = 0; i < o.SourcesCount; i++)
+                    {
+                        CollectPointerWords(o.GetSource(i), depth + 1, words, seen);
+                    }
+
+                    return;
+                case Instruction.Subtract:
+                    CollectPointerWords(o.GetSource(0), depth + 1, words, seen);
+                    return;
+                case Instruction.BitwiseAnd:
+                    if (o.GetSource(1).Type == OperandType.Constant)
+                    {
+                        CollectPointerWords(o.GetSource(0), depth + 1, words, seen);
+                    }
+                    else if (o.GetSource(0).Type == OperandType.Constant)
+                    {
+                        CollectPointerWords(o.GetSource(1), depth + 1, words, seen);
+                    }
+
+                    return;
+            }
+        }
+
+        // A value made only of constants, or null
+        private static long? ConstValue(Operand op, int depth)
+        {
+            if (op == null)
+            {
+                return 0;
+            }
+
+            if (op.Type == OperandType.Constant)
+            {
+                return op.Value;
+            }
+
+            if (op.Type != OperandType.LocalVariable || depth > 16 || op.AsgOp is not Operation o)
+            {
+                return null;
+            }
+
+            long? a = o.SourcesCount > 0 ? ConstValue(o.GetSource(0), depth + 1) : null;
+            long? b = o.SourcesCount > 1 ? ConstValue(o.GetSource(1), depth + 1) : null;
+
+            return o.Inst switch
+            {
+                Instruction.Copy => a,
+                Instruction.Add when a.HasValue && b.HasValue => a + b,
+                Instruction.Subtract when a.HasValue && b.HasValue => a - b,
+                Instruction.Multiply when a.HasValue && b.HasValue => a * b,
+                Instruction.ShiftLeft when a.HasValue && b.HasValue => a << (int)b,
+                Instruction.ShiftRightU32 when a.HasValue && b.HasValue => (long)((uint)a >> (int)b),
+                Instruction.BitwiseAnd when a.HasValue && b.HasValue => a & b,
+                Instruction.BitwiseOr when a.HasValue && b.HasValue => a | b,
+                _ => null,
+            };
         }
 
         private static uint PackCbSlotAndOffset(int cbSlot, int cbOffset)
