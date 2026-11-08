@@ -72,6 +72,7 @@ static void eviction(void) {
     guard_evict(1);
     CHECK(g_alias_idle == idle + 1 && g_ser_gen == gen + 1, "one entry left, one bump");
     settle();
+    settle();   // main's deferred drain (4f47d211, ea0c98df) lets go of a retired object one submission later than the guard's first form expected
     CHECK(!w_dead, "the idle entry nothing holds is gone");
     CHECK(w_live && in_set(w_live), "a live object's texture stays, and stays resident");
     CHECK(w_seen && in_set(w_seen), "an entry a lookup found lately stays");
