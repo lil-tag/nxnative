@@ -7839,6 +7839,9 @@ static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};
 @interface PbaseBuild : NSObject { @public dispatch_group_t done; id<MTLRenderPipelineState> ps; NSError *error; int compiled; } @end
 @implementation PbaseBuild @end
 static nvn_hmap g_pbase_pending = {.klen = sizeof(pbase_key)};
+// Bases the archives were searched for and do not hold (under g_pbase_lock): searched once. With the background build table full a draw cannot queue its pipeline, so it asked again
+// at every draw: Ocarina of Time's first Castle Town visit searched about 113 archive files 67,000 times in 300 frames, 6.9 s, frames 70 ms where the GPU took 44
+static nvn_hmap g_pbase_miss = {.klen = sizeof(pbase_key)};
 static os_unfair_lock g_pbase_lock = OS_UNFAIR_LOCK_INIT;
 static NSString *pso_user_path(void);
 // The pipeline archive made offline (dm/gfx/tools/pso_offline.py, metal-tt) and bundled with the app: DM_PSO_BUNDLE=<folder> (the iOS app sets it to its pso/ folder when it has one;
@@ -8286,9 +8289,10 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
     else {
         uint64_t t0 = bp_now();
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
-        if (!vd) for (id<MTL4Archive> a in g_arch4p) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) break;
+        os_unfair_lock_lock(&g_pbase_lock); int searched = hm_get_id(&g_pbase_miss, &bk) != nil; os_unfair_lock_unlock(&g_pbase_lock);
+        if (!vd && !searched) for (id<MTL4Archive> a in g_arch4p) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) break;
         int from_run = 0;
-        if (!base) for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) { from_run = 1; break; }
+        if (!base && !searched) for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) { from_run = 1; break; }
         uint64_t t1 = bp_now();
         if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
         if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
@@ -8299,7 +8303,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
             if (cap) g_compacted++; else g_compact_bad = 1;   // not in the new files: the old ones stay
         }
         if (!base) {
-            if (g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
+            if (!searched && g_arch4.count + g_arch4p.count) { g_pt_miss_n++; g_pt_miss_ns += t1 - t0; }
             if (compile) {
                 NSError *be = nil; base = arch_capture(b, &be, vd, NULL); job->error = be; job->compiled = 1;
                 g_pt_comp_ns += bp_now() - t1;
@@ -8309,7 +8313,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
         if (base || compile) g_pb_base_ns += bp_now() - t0;
         os_unfair_lock_lock(&g_pbase_lock);
         job->ps = base;
-        if (base) hm_put_id(&g_pbase, &bk, base);
+        if (base) hm_put_id(&g_pbase, &bk, base); else if (!searched) hm_put_id(&g_pbase_miss, &bk, NSNull.null);
         hm_rel(nvn_hm_del(&g_pbase_pending, &bk)); dispatch_group_leave(job->done);
         os_unfair_lock_unlock(&g_pbase_lock);
         if (!base) { if (compile && e) *e = job->error; return nil; }   // NOLINT(clang-analyzer-osx.cocoa.RetainCount): job stays in g_pbase_pending (hm_put_id's CFBridgingRetain) until hm_rel releases it, not a leak
