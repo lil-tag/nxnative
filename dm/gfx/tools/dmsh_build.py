@@ -90,6 +90,25 @@ def fog_tolerance(key, msl):
     if not tests: print(f'[RED] {key}: the discard test has another shape, no tolerance added', file=sys.stderr)
     return msl
 
+# The same fog shader's light falloff multiplies a value that can be infinite by a factor clamped to 0. The console's FMUL.FMZ makes that product 0; here it was NaN, written into a half-size
+# RG11B10F target that model shaders read and bloom spread: Ocarina of Time's white cloud at the forest exit (28 frames with non-finite pixels on the route to Hyrule Field, 0 of 2,382 with this).
+# Every scalar product of two values and every fma gets the rule, which changes only results that were NaN. shortcut: one shader by key; the general fix is FMZ in the translator for the
+# instruction forms that still drop it (AFmz covers Ampere FMUL / FFMA), once one is identified
+FMZ_KEYS = {'5ad65c0eefd09c7f'}
+def fmz_rule(key, msl):
+    if key not in FMZ_KEYS or 'dm_fmz' in msl: return msl
+    at = msl.find('using namespace metal;')
+    if at < 0: print(f'[RED] {key}: no MSL prologue, FMZ rule not added', file=sys.stderr); return msl
+    at += len('using namespace metal;')
+    msl = msl[:at] + ('\n// FMUL.FMZ / FFMA.FMZ: a zero factor gives 0, even against infinity (dmsh_build.py fmz_rule)\n'
+                      'static inline float dm_fmz(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n'
+                      'static inline float dm_fmzfma(float a, float b, float c) { return (a == 0.0 || b == 0.0) ? c : fma(a, b, c); }\n') + msl[at:]
+    v = r'(_\d+|-?[0-9.]+(?:e[-+]?\d+)?)'
+    msl, n1 = re.subn(rf'^(\s*float _\d+ = ){v} \* {v};$', r'\1dm_fmz(\2, \3);', msl, flags=re.M)
+    msl, n2 = re.subn(r'^(\s*float _\d+ = )fma\((_\d+), (_\d+), (_\d+)\);$', r'\1dm_fmzfma(\2, \3, \4);', msl, flags=re.M)
+    if not n1 + n2: print(f'[RED] {key}: no scalar product found, FMZ rule has nothing to change', file=sys.stderr)
+    return msl
+
 # Ampere HMMA.16816 with an f16 accumulator (agl's upscaler networks, the NDVE video networks) reaches the MSL as calls of dmsh_hmma16816_f16(lane, block, A0..A3, B0, B1, C0, C1,
 # flags, A's LDSM address, A0..A3's offsets, A's row stride, out D1) → D0, the subgroup's 256-word block of the scratch shared memory as the last argument (InstEmitAmpereTensor.AHmma,
 # TensorPass, HelperFunctionManager.GenerateHmma16816F16). The translator's body computes D lane by lane from the block; here it becomes simdgroup_matrix code over the same block:
@@ -1662,7 +1681,7 @@ def finish(key, w, j, c1):
     else: fu = fd = None
     try: binds = reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
-    final = open(msl).read(); rr = loop_guard(fog_tolerance(key, final))
+    final = open(msl).read(); rr = loop_guard(fmz_rule(key, fog_tolerance(key, final)))
     if rr != final: open(msl, 'w').write(rr)
     side, lost = {}, []
     def compile_targets():   # the selected targets from the same MSL (MSL identical to one compiled before takes that library, dmsh_mtlcache.py)
@@ -1673,7 +1692,7 @@ def finish(key, w, j, c1):
     except subprocess.CalledProcessError as e:
         if not lay and not fu and not fd: return 'metal failed', str(e)[:160], None
         lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('dual source', fd)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
-        open(msl, 'w').write(loop_guard(fog_tolerance(key, plain))); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
+        open(msl, 'w').write(loop_guard(fmz_rule(key, fog_tolerance(key, plain)))); lay = fu = fd = None   # the layer, integer-output and dual-source entry points are extras: a library that does not build with them is built without
         try: compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))

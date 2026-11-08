@@ -16,4 +16,12 @@ assert g.count('dm_lg') == 6 and 'for (; ++dm_lg < 262144u;)' in g and '} while 
 assert guard(g) == g, 'a guarded source is left alone'
 plain = 'struct S\n{\n    int a;\n};\nvoid f(int x)\n{\n    x = 1;\n}\n'
 assert guard(plain) == plain, 'a shader with no loop keeps its text, and its compiled library'
-print('fog tolerance and loop guard: ok')
+exec(src[src.index('FMZ_KEYS = {'):src.index('\n\n', src.index('def fmz_rule'))], ns)
+fmz = ns['fmz_rule']
+m = '#include <metal_stdlib>\nusing namespace metal;\nvoid f()\n{\n    float _10 = _8 * _9;\n    float _11 = _10 * 0.5;\n    float _12 = fma(_10, _11, _9);\n    float2 _13 = _7 * _6;\n}\n'
+o = fmz('5ad65c0eefd09c7f', m)
+assert 'float _10 = dm_fmz(_8, _9);' in o and 'float _11 = dm_fmz(_10, 0.5);' in o and 'float _12 = dm_fmzfma(_10, _11, _9);' in o, o
+assert 'float2 _13 = _7 * _6;' in o, 'vectors stay as they are'
+assert o.count('static inline float dm_fmz(') == 1 and fmz('5ad65c0eefd09c7f', o) == o, 'applied once'
+assert fmz('0000000000000000', m) == m, 'other shaders stay as they are'
+print('fog tolerance, FMZ rule and loop guard: ok')

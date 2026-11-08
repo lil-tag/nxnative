@@ -8725,7 +8725,7 @@ static void pre_mesh(NSString *tk, NSString *mk, NSString *fk, int zero) {
         MTL4MeshRenderPipelineDescriptor *b = mtk_desc4(tf, mf, ff, [tst[@"payload"] unsignedIntValue], [tst[@"threads"] unsignedIntValue], [mst[@"threads"] unsignedIntValue], 1, 0);   // one sample, no alpha to coverage: all of what the game draws its meshes with so far
         id ps = mtk_base(b); int found = ps != nil;
         if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newRenderPipelineStateWithDescriptor:b error:nil])) { found = 1; break; }
-        if (!ps) ps = arch_capture(b, &e, 0);
+        if (!ps) ps = arch_capture(b, &e, 0, NULL);
         px_done(ps, found, e, [NSString stringWithFormat:@"mesh pipeline %@ %@ %@", tk ?: @"-", mk, fk]);
     }
 }
