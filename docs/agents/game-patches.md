@@ -91,7 +91,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 0 | 0 | `game` ×2 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 7 | 0 | 0 | `game` ×2, `build` → `game` ×2 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 
@@ -608,8 +608,18 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md), `0400486024DEC000`, [patches.py](../../dm/games/0400486024DEC000/patches.py).
 
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
+- **`build` → `game`**, rendering, blocked: the store and its role are verified for this main build only, checked: v131072 main E0F3CCFAF50065AE4EA01EB5AEB13B1A, original store and surrounding code, 2026-11-06: dynamic-resolution ceiling. The game's final scale store follows its dynamic and fixed-mode choices
+- **`build` → `game`**, rendering, blocked: the flag read and the scale constant are verified for this main build only, checked: v131072 main E0F3CCFAF50065AE4EA01EB5AEB13B1A, the tbz at +0x805bd0 and the fixed path at +0x80640c read by disassembly (2026-11-08): fixed resolution and its scale. The resolution controller's config flag and the fixed path's scale constant
 - **`game`**, rendering, at goal, checked: v131072 main: one function with this fingerprint (a leaf, x16 / x17 free), its callers and the controller read by disassembly (2026-11-08): dynamic resolution held at full size. The game's own dynamic-resolution level function, found by its function's fingerprint on any build that keeps the function; switchable (DM_DYNAMIC_RESOLUTION)
 
+- **v131072 `main`** `e0f3ccfa…` ([patches.py:141](../../dm/games/0400486024DEC000/patches.py#L141))
+  - frame step `+0x6e6cc4`: frame ratio: the host's step × base rate / 60 instead of base rate / the game's frame rate (state page target fps; 0 = the game's ratio)
+  - frame step `+0x805bd0`: fixed resolution: the "dynamic resolution disabled" path also when state +0x60 is set
+  - frame step `+0x806420`: fixed resolution: its scale from state +0x64 (0 = the game's 1.0)
+  - frame step `+0x8065e0`: dynamic resolution level: 0 (full resolution) unless state +0x40 (DM_DYNAMIC_RESOLUTION) runs the game's choice
+  - frame step `+0x31d3f48`: dynamic resolution capped by the host render scale (1.0 = original)
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: DYNAMIC_RESOLUTION
 - **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; launcher capabilities: DYNAMIC_RESOLUTION
 
 ### The Legend of Zelda: Tears of the Kingdom
