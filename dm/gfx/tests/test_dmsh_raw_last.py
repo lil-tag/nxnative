@@ -109,7 +109,7 @@ class RawLast(Translated):
 
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
 def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
-VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')
+VEC_HELPER = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){3}const device (_\d+)& \w+, const device _\d+& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')   # with #1585: the site, and its table
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -141,7 +141,7 @@ class RawVector(Translated):
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
                   '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
-                  f'        int w = {m.group(1)}(lo, hi, map, last, vec);\n'
+                  f'        int w = {m.group(1)}(lo, hi, -1, map, map, last, vec);\n'   # -1: no bind-time site (#1585), its table unread
                   '        out[id * 16 + s] = w == 0 || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
         with tempfile.TemporaryDirectory() as w:
             w = Path(w)
