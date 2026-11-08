@@ -1074,9 +1074,13 @@ static void rc_query_operand(rc_report *r) {
     if (r->opaque_later) { r->known=0; r->opaque_later=0; }
     if (r->opaque_unreliable) r->unreliable=1;
 }
+// DM_NVN_COND_CONSERVATIVE=1: every samples-passed condition keeps drawing, as before 04419bc2 evaluated them from the landed result (occlusion culling only saves work). An
+// A/B for an object that flickers when the frame time changes: a result landed a frame late culls a draw the game meant to show. Ocarina of Time's emulators offer the same
+// (Fritchii's Occlusion Off, Hookshot's HOOKSHOT_OCCLUSION_OFF)
+static int cond_conservative(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_COND_CONSERVATIVE"); v = e && atoi(e) == 1; if (v) MLOG("DM_NVN_COND_CONSERVATIVE=1: samples-passed conditions keep drawing"); } return v; }
 static void rc_note(uint64_t addr, int kind) {
     rc_report *r=rc_ensure(addr);
-    r->conservative=kind==3;   // counter kinds the host does not implement; a samples-passed result is read once it has landed (rc_value)
+    r->conservative=kind==3 || cond_conservative();   // counter kinds the host does not implement; a samples-passed result is read once it has landed (rc_value), unless DM_NVN_COND_CONSERVATIVE keeps drawing
     // A condition compares adjacent 16-byte records. Either operand can be the
     // query; track its unreported neighbor before later explicit buffer writers.
     // Existing entries keep their own report type, pending fence and known bytes.
@@ -8398,7 +8402,7 @@ static void pso4_init(void) {
         const char *e = getenv("DM_PSO_ARCHIVE"); NSString *user = pso_user_path();
         g_arch_dir = e && !strcmp(e, "off") ? nil : e && *e ? @(e) : user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_archive"] : nil;
         NSMutableArray<id<MTL4Archive>> *arch = [NSMutableArray array], *archp = [NSMutableArray array];
-        pso_bundle_open(archp);   // first: it holds every pair's base
+        arch_open_begin(); pso_bundle_open(archp); arch_open_end();   // first: it holds every pair's base. Mapped, like the device's archives below (#1817): on an external drive Foundation would read the whole file into memory
         if (g_arch_dir) {
             g_arch_q = dispatch_queue_create("dm.nvn.pso-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
             g_arch_pending = dispatch_group_create();

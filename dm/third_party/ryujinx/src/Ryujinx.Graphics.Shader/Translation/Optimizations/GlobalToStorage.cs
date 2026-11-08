@@ -1102,6 +1102,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             context.MarkLabel(lblSkip);
 
+            if (operation.Inst == Instruction.Load && vectorCount > 1)
+            {
+                // A miss reads 0 in every word of a vector load, as the word loads it replaces did: gmem_vec has no initial value, and the caller reads its words after the call (#1813)
+                for (int k = 0; k < vectorCount - 1; k++)
+                {
+                    context.Store(StorageKind.LocalMemory, resourceManager.GetRawVectorMemory(), Const(k), Const(0));
+                }
+            }
+
             bool returnsValue = operation.Dest != null;
 
             if (returnsValue)
