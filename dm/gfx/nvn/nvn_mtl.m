@@ -1251,7 +1251,7 @@ void mtl_prepare(void) {
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 void mtl_sub_begin(void) {
-    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL; g_rc_npend = 0; g_rc_skip = 0;
+    mtl_init(); g_sub_serial++; g_seg = 0; seg_clk_put(g_sclk); g_sclk = NULL;
     g_ndve_decoded = nil; g_ndve_skip_end = NULL;
     sub_cut_begin();
     defer_drain();
@@ -13551,7 +13551,7 @@ static int ndve_scale(id<MTLTexture> in, id<MTLTexture> out, const tex_t *desc) 
         !(out.usage & MTLTextureUsageRenderTarget)) return 0;
     zskip_del(desc->serial);
     sparse_gpu_wrote(desc);
-    mtl_pool_gpu_written(desc->pool);
+    mtl_tex_gpu_written(desc);   // main renamed the pool-wide note into the texture's (e2b76d4e)
     rp_end();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     ubd_land_compute();
