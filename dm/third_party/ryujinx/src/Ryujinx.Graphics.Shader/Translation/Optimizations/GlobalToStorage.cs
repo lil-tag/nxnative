@@ -93,6 +93,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 _hfm = hfm;
             }
 
+            // nxnative: the raw vector load helpers by word count (TryGenerateRawStorageOp), kept apart from _entries, where a scalar load would find them
+            public readonly Dictionary<int, int> RawVectorFunctions = [];
+
+            public int AddRawVectorFunction(int count, Function function)
+            {
+                int functionId = _hfm.AddFunction(function);
+
+                RawVectorFunctions[count] = functionId;
+
+                return functionId;
+            }
+
             public int AddFunction(Operation baseOp, bool isMultiTarget, IReadOnlyList<uint> targetCbs, Function function)
             {
                 int functionId = _hfm.AddFunction(function);
@@ -395,13 +407,99 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     block,
                     operation,
                     out int functionId,
-                    out Operand site))
+                out Operand site,
+                out bool raw))
                 {
                     return null;
                 }
 
+                if (raw &&
+                    operation.Inst == Instruction.Load &&
+                    operation.StorageKind == StorageKind.GlobalMemory &&
+                    operation.GlobalVectorCount > 1 &&
+                    operation.GlobalVectorWord == 0 &&
+                    TryGetRawVectorFunction(gtsContext, resourceManager, gpuAccessor, operation, out int vectorFunctionId))
+                {
+                    return GenerateRawVectorLoad(resourceManager, node, operation, vectorFunctionId, site);   // nxnative: with the load's bind-time site (#1585), as the word helpers take it
+                }
+
                 return GenerateCallStorageOp(node, operation, null, functionId, site);
             }
+        }
+
+        // nxnative: the first word of a 64- or 128-bit global load whose address goes through the pool table (Operation.GlobalVectorCount) calls the vector helper, which leaves
+        // the other words in the shader's gmem_vec local memory; the loads of those words, which follow in the block, read them from there right after the call. A word whose
+        // load is gone (unused) is not read. The scan stops at any other memory access or call, so nothing writes gmem_vec in between
+        private static LinkedListNode<INode> GenerateRawVectorLoad(ResourceManager resourceManager, LinkedListNode<INode> node, Operation operation, int functionId, Operand site = null)
+        {
+            int count = operation.GlobalVectorCount;
+            int vectorMemoryId = resourceManager.GetRawVectorMemory();
+
+            node = GenerateCallStorageOp(node, operation, null, functionId, site);   // the first word's load, now a copy of the call's result
+
+            LinkedListNode<INode> insertAfter = node;
+
+            for (LinkedListNode<INode> next = node.Next; next != null; next = next.Next)
+            {
+                if (next.Value is not Operation follower)
+                {
+                    continue;
+                }
+
+                if (follower.Inst == Instruction.Load &&
+                    follower.StorageKind == StorageKind.GlobalMemory &&
+                    follower.GlobalVectorCount == count &&
+                    follower.GlobalVectorWord > 0)
+                {
+                    Operand word = Local();
+                    Operation load = new(Instruction.Load, StorageKind.LocalMemory, word, Const(vectorMemoryId), Const(follower.GlobalVectorWord - 1));
+
+                    insertAfter = insertAfter.List.AddAfter(insertAfter, load);
+
+                    // A plain copy in its place: TurnIntoCopy keeps the storage kind, and this pass, which reaches the node later, would take it for a global access again
+                    Operand dest = follower.Dest;
+                    follower.TurnIntoCopy(word);
+                    word.UseOps.Remove(follower);
+                    follower.Dest = null;
+                    next.Value = new Operation(Instruction.Copy, dest, word);
+
+                    if (follower.GlobalVectorWord == count - 1)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                if (follower.GlobalVectorCount != 0 ||
+                    follower.StorageKind != StorageKind.None ||
+                    follower.Inst == Instruction.Call ||
+                    follower.Inst == Instruction.Barrier ||
+                    follower.Inst == Instruction.MemoryBarrier ||
+                    follower.Inst.IsAtomic())
+                {
+                    break;
+                }
+            }
+
+            return node;
+        }
+
+        private static bool TryGetRawVectorFunction(
+            GtsContext gtsContext,
+            ResourceManager resourceManager,
+            IGpuAccessor gpuAccessor,
+            Operation operation,
+            out int functionId)
+        {
+            int count = operation.GlobalVectorCount;
+
+            if (gtsContext.RawVectorFunctions.TryGetValue(count, out functionId))
+            {
+                return true;
+            }
+
+            return TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId, vectorCount: count);
         }
 
         private static bool CanUseInlineStorageOp(Operation operation, TargetLanguage targetLanguage)
@@ -609,12 +707,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             BasicBlock block,
             Operation operation,
             out int functionId,
-            out Operand site)
+            out Operand site,
+            out bool raw)
         {
             site = null;
             Queue<PhiNode> phis = new();
             HashSet<PhiNode> visited = [];
             List<uint> targetCbs = [];
+            raw = false;
 
             Operand globalAddress = operation.GetSource(0);
 
@@ -683,6 +783,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     site = Const(FindPointerSite(resourceManager, gpuAccessor, operation));
                 }
             }
+
+            raw = targetCbs.Count == 0;
 
             if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
             {
@@ -832,7 +934,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             IGpuAccessor gpuAccessor,
             Operation operation,
             out int functionId,
-            bool resolved = false)
+            bool resolved = false,
+            int vectorCount = 1)
         {
             functionId = 0;
 
@@ -1012,12 +1115,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Function function = new(
                 ControlFlowGraph.Create(context.GetOperations()).Blocks,
-                GetFunctionName(operation, isMultiTarget: true, []) + (resolved ? "RawResolved" : "Raw"),
+                GetFunctionName(operation, isMultiTarget: true, []) + (resolved ? "RawResolved" : vectorCount > 1 ? $"RawV{vectorCount}" : "Raw"),
                 returnsValue,
                 inArgumentsCount,
                 0);
 
-            if (resolved)
+            if (vectorCount > 1)
+            {
+                functionId = gtsContext.AddRawVectorFunction(vectorCount, function);   // one helper per width, found again by TryGetRawVectorFunction
+            }
+            else if (resolved)
             {
                 functionId = gtsContext.AddHelper(function);
                 gtsContext.ResolvedLoadFunctions[operation.StorageKind] = functionId;
@@ -1045,7 +1152,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                 Operand resultValue = null;
 
-                if (operation.Inst == Instruction.Load)
+                if (operation.Inst == Instruction.Load && vectorCount > 1)
+                {
+                    // All the words of a 64- or 128-bit load in one vector load (ReplaceGlobalMemoryWithStorage, GenerateRawVectorLoad): word 0 returned, the others left in
+                    // gmem_vec. The first word's entry holds them all: such a load is aligned to its size on the GPU, and every entry starts and ends on a pool's 4 KiB boundary
+                    // (nvn_mtl.m gmem_map). Ocarina of Time's foliage mesh shaders read 464 of their 506 raw words as 116 such loads (docs/reference/shaders.md, 128-bit raw
+                    // global loads read one word at a time). The delta comes from the table, the bind-time site (#1585) or a resolved run (#1752) alike
+                    resultValue = context.Add(Instruction.Load, StorageKind.GlobalMemoryVector, Local(), hostLow, hostHigh, Const(vectorCount), Const(resourceManager.GetRawVectorMemory()));
+                }
+                else if (operation.Inst == Instruction.Load)
                 {
                     resultValue = context.Load(StorageKind.GlobalMemory, hostLow, hostHigh);
 
