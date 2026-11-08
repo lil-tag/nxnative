@@ -12,7 +12,7 @@
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
-import atexit, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
+import atexit, bisect, inspect, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
 import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
@@ -141,6 +141,7 @@ def split_params(text):   # commas inside template arguments (spvUnsafeArray<uin
         else: cur += ch
     return params
 BRACE = re.compile(r'[{}]')
+FUNC_OPEN = re.compile(r'(?=\n\{\n)')   # where a line holding only a brace starts, overlapping ones included
 def block_end(src, start):   # the index of the brace closing the block opened at src[start] (start itself when it is no brace); the regular expression steps from brace to brace
     if start < len(src) and src[start] not in '{}': return start
     depth = 0
@@ -168,6 +169,14 @@ def hmma_msl(msl):
     for c in HMMA_CALL.finditer(msl):
         if m.start() <= c.start() <= body_end: continue
         open_at = msl.rfind('\n{\n', 0, c.start()) + 1
+    # A function's opening and end are found once (opens, ends): a network's function holds hundreds of calls in up to 1.8 MB of MSL, and a scan per call took Ocarina of Time's 71 HMMA
+    # shaders 578 s of one core. A call's function opens at the last line holding only a brace that ends before the call (overlapping ones included, as rfind would find them)
+    opens = [o.start() for o in FUNC_OPEN.finditer(msl)]
+    calls, callers, ends = [], {}, {}
+    for c in HMMA_CALL.finditer(msl):
+        if m.start() <= c.start() <= body_end: continue
+        k = bisect.bisect_right(opens, c.start() - 3) - 1
+        open_at = opens[k] + 1 if k >= 0 else 0
         if open_at > 0 and open_at not in ends: ends[open_at] = block_end(msl, open_at)
         if open_at <= 0 or ends[open_at] < c.start(): raise ValueError('dmsh_hmma16816_f16: a call outside a function body')
         if open_at not in callers:
