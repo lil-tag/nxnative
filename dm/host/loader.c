@@ -309,6 +309,26 @@ static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name;
 }
+// A launcher setting changed while the game runs (the window's Game menu in front_mac.m, DM_CTL "setting KEY=VALUE"): the game reads the frame step state page every frame, so the
+// frame rate, render scale and dynamic resolution apply from its next frame; Hold goes to the frame step (hle_nvn.c), the console mode to the game as a mode change (hle_oe.c, message 30).
+// dm_live_value gives the value in effect (the launch environment until a change). Returns 1 when applied, 0 when this build cannot take that setting now or the value is not one it takes
+static struct { const char *k; char v[16]; } g_live[] = {{"DM_FPS_TARGET", ""}, {"DM_FPS_HOLD", ""}, {"DM_RENDER_SCALE", ""}, {"DM_DYNAMIC_RESOLUTION", ""}, {"DM_OPMODE", ""}};
+const char *dm_live_value(const char *key) { for (int i = 0; i < (int)(sizeof g_live / sizeof *g_live); i++) if (!strcmp(g_live[i].k, key) && g_live[i].v[0]) return g_live[i].v; return getenv(key); }
+static int put_u32(size_t off, uint32_t v) { if (!dm_fps_state) return 0; __atomic_store_n((uint32_t *)(dm_fps_state + off), v, __ATOMIC_RELAXED); return 1; }
+int dm_live_setting(const char *key, const char *val) {
+    int ok = 0; char *end; float f;
+    if (!strcmp(key, "DM_FPS_HOLD") && (!strcmp(val, "on") || !strcmp(val, "off"))) { void nvn_fstep_hold_set(int); nvn_fstep_hold_set(!strcmp(val, "on")); ok = 1; }
+    else if (!strcmp(key, "DM_OPMODE") && (!strcmp(val, "0") || !strcmp(val, "1"))) { void dm_set_opmode(int); dm_set_opmode(*val - '0'); ok = 1; }
+    else if (!strcmp(key, "DM_FPS_TARGET") && (!strcmp(val, "30") || !strcmp(val, "60"))) { f = (float)atoi(val); uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0, b); }
+    else if (!strcmp(key, "DM_RENDER_SCALE") && (f = strtof(val, &end), end != val && !*end && f >= 0.5f && f <= 2.0f)) { uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0x10, b); }
+    else if (!strcmp(key, "DM_DYNAMIC_RESOLUTION") && (!strcmp(val, "0") || !strcmp(val, "1"))) ok = put_u32(0x40, (uint32_t)(*val - '0'));
+    if (ok) {   // not setenv: other threads may read the environment at the same time
+        for (int i = 0; i < (int)(sizeof g_live / sizeof *g_live); i++) if (!strcmp(g_live[i].k, key)) snprintf(g_live[i].v, sizeof g_live[i].v, "%s", val);
+        LOG("live setting: %s=%s applied while running", key, val);
+    }
+    else LOG("[RED] live setting: %s=%s not applied (%s)", key, val, dm_fps_state ? "not a setting this build changes while running, or a value it does not take" : "this build has no frame step state page");
+    return ok;
+}
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {

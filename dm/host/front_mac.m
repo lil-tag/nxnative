@@ -822,6 +822,68 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
 
+// ---------- Game: the launcher's settings the game takes while it runs (loader.c dm_live_setting) ----------
+// The rows are the launcher's own (the app's Resources/dm/launcher.json, or a build folder's nxplay-settings.json when the host runs from its tools/), for the settings the host changes
+// while the game runs: Frame rate, Hold frames when late, Render scale, Dynamic resolution, Console mode. A click applies from the game's next frame and, in an app, is kept as the
+// launcher's choice (launcher.<VAR> in the app's preferences, which its launcher and NX2Apple show and apply at the next launch). A host run from a build folder keeps nothing
+int dm_live_setting(const char *key, const char *val);
+const char *dm_live_value(const char *key);
+static NSArray<NSDictionary *> *game_rows(void) {
+    static NSArray *rows; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableArray *paths = [NSMutableArray array];
+        if (NSBundle.mainBundle.bundleIdentifier) [paths addObject:[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"dm/launcher.json"]];
+        [paths addObject:[[NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"nxplay-settings.json"]];
+        NSSet *live = [NSSet setWithObjects:@"DM_FPS_TARGET", @"DM_FPS_HOLD", @"DM_RENDER_SCALE", @"DM_DYNAMIC_RESOLUTION", @"DM_OPMODE", nil];
+        for (NSString *p in paths) {
+            NSData *d = [NSData dataWithContentsOfFile:p]; if (!d) continue;
+            id j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+            NSArray *all = [j isKindOfClass:NSDictionary.class] ? j[@"settings"] : nil; if (![all isKindOfClass:NSArray.class]) continue;
+            NSMutableArray *r = [NSMutableArray array];
+            for (NSDictionary *row in all) if ([row isKindOfClass:NSDictionary.class] && [row[@"env"] isKindOfClass:NSString.class] && [live containsObject:row[@"env"]]) [r addObject:row];
+            rows = r; LOG("front end: Game menu, %lu settings from %s", (unsigned long)r.count, p.UTF8String); break;
+        }
+    });
+    return rows;
+}
+static NSString *row_str(id v) { return [v isKindOfClass:NSString.class] ? v : [v description] ?: @""; }
+@interface DmGameMenuDelegate : NSObject <NSMenuDelegate>
+@end
+@implementation DmGameMenuDelegate
+- (void)menuNeedsUpdate:(NSMenu *)menu {   // every open: the checkmarks show the values in effect
+    [menu removeAllItems];
+    for (NSDictionary *row in game_rows()) {
+        NSString *env = row[@"env"], *label = row_str(row[@"label"]);
+        const char *cv = dm_live_value(env.UTF8String); NSString *cur = cv ? @(cv) : row_str(row[@"default"]);
+        if ([row[@"kind"] isEqual:@"toggle"]) {
+            BOOL on = [cur isEqualToString:row_str(row[@"on"])];
+            NSMenuItem *it = [menu addItemWithTitle:label action:@selector(pick:) keyEquivalent:@""];
+            it.target = self; it.state = on ? NSControlStateValueOn : NSControlStateValueOff; it.toolTip = row_str(row[@"note"]);
+            it.representedObject = @[env, row_str(on ? row[@"off"] : row[@"on"])];
+        } else if ([row[@"options"] isKindOfClass:NSArray.class]) {
+            NSMenu *sub = [[NSMenu alloc] initWithTitle:label]; sub.autoenablesItems = NO;
+            for (NSArray *o in row[@"options"]) {
+                if (![o isKindOfClass:NSArray.class] || o.count < 2) continue;
+                NSMenuItem *it = [sub addItemWithTitle:row_str(o[1]) action:@selector(pick:) keyEquivalent:@""];
+                it.target = self; it.state = [cur isEqualToString:row_str(o[0])] ? NSControlStateValueOn : NSControlStateValueOff;
+                it.representedObject = @[env, row_str(o[0])];
+            }
+            NSMenuItem *head = [menu addItemWithTitle:label action:nil keyEquivalent:@""]; head.submenu = sub; head.toolTip = row_str(row[@"note"]);
+        }
+    }
+    if (!menu.numberOfItems) [menu addItemWithTitle:@"No settings change while the game runs" action:nil keyEquivalent:@""].enabled = NO;
+}
+- (void)pick:(NSMenuItem *)it {
+    NSString *env = it.representedObject[0], *val = it.representedObject[1];
+    if (!dm_live_setting(env.UTF8String, val.UTF8String)) return;
+    NSString *bid = NSBundle.mainBundle.bundleIdentifier;   // an app's: the launcher's choices live in its preferences domain
+    if (![bid hasPrefix:@"org.nxnative."]) return;
+    CFPreferencesSetAppValue((__bridge CFStringRef)[@"launcher." stringByAppendingString:env], (__bridge CFStringRef)val, (__bridge CFStringRef)bid);
+    LOG("front end: %s=%s kept for the next launch (%s)", env.UTF8String, val.UTF8String, CFPreferencesAppSynchronize((__bridge CFStringRef)bid) ? "saved" : "[RED] saving failed");
+}
+@end
+static DmGameMenuDelegate *g_game_menu;   // NSMenu keeps its delegate unretained
+
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
     NSTextField *_header;         // the one-line status line above the rows
@@ -1507,6 +1569,9 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
+        g_game_menu = [DmGameMenuDelegate new];   // Game: the settings the game takes while it runs
+        NSMenu *gm = [[NSMenu alloc] initWithTitle:@"Game"]; gm.delegate = g_game_menu; gm.autoenablesItems = NO;
+        [[bar addItemWithTitle:@"Game" action:nil keyEquivalent:@""] setSubmenu:gm];
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
