@@ -144,13 +144,13 @@ static void compute_pipelines(void) {
     EXPECT("compute again: nothing captured", pending, g_arch_new);
     EXPECT("compute again: its dispatch writes", 1, run_kernel(kp2));
     // compaction during the prewarm: captured again from its function, for the file that replaces the old ones
-    g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1);
+    g_compact_enabled = 1; g_compacted = 0; g_compact_arch = g_arch4; atomic_store(&g_warm_running, 1);   // the files being compacted: every open one (pso4_init sets them, tail compaction)
     EXPECT("compute, compaction: a pipeline", 1, cps_new(kf, &err) != nil);
     EXPECT("compute, compaction: from the archive", run + 2, g_cps_run);
     dispatch_sync(cps_harvest_q(), ^{});
     EXPECT("compute, compaction: captured again", 1, g_compacted);
     EXPECT("compute, compaction: waits for the flush", pending + 1, g_arch_new);
-    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0; g_compact_arch = nil;
     arch_flush_wait();
     // no Metal 4 descriptor: built through the MTLDevice, no lookup, nothing captured
     int looked = la->lookups; built = g_cps_built; pending = g_arch_new;
@@ -503,7 +503,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         NSMutableArray<id<MTL4Archive>> *open = [NSMutableArray array]; NSMutableArray<NSString *> *paths = [NSMutableArray array];
         for (NSString *n in names.reverseObjectEnumerator) { NSString *f = [@(cdir) stringByAppendingPathComponent:n]; [paths addObject:f]; [open addObject:[g_dev newArchiveWithURL:[NSURL fileURLWithPath:f] error:&err]]; }
         nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = open;   // as a new start with that many files
-        g_compact_enabled = 1; g_compact_files = paths; g_compacted = 0;
+        g_compact_enabled = 1; g_compact_files = paths; g_compact_arch = g_arch4; g_compacted = 0;   // as pso4_init: the archives of those files
         g_arch_period_max = 4;   // the recaptured bases fill two periods and part of a third: each full one is handed over, the timer's flushes wait
         uint64_t arch0 = g_pb_archived, built0 = g_pb_built;
         ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
@@ -525,9 +525,10 @@ int main(int argc, char **argv) { @autoreleasepool {
         arch_flush_wait();
         EXPECT("compaction: the marker exists while the flush writes", 1, ms->calls == 1 && ms->marked == 1);
         EXPECT("compaction: the flush that returned removed the marker", 0, [NSFileManager.defaultManager fileExistsAtPath:arch_compact_marker()]);
-        names = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil];
+        names = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(cdir) error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]];   // not the compacted marker (tail compaction)
         EXPECT("compaction: a file per period left", (descs.count + 3) / 4, names.count);
         EXPECT("compaction: done", 0, g_compact_periods + !g_compact_closed + g_compact_bad);
+        EXPECT("compaction: the compacted marker counts the files it wrote (the next start compacts only newer ones)", (int)names.count, arch_compacted_files());
         g_arch_period_max = ARCH_PERIOD_MAX;
         // a marker left by a compaction that did not finish: the next start on this system build does not compact, one from another build is removed and compaction tried
         EXPECT("compaction: allowed without a marker", 1, arch_compact_allowed());
