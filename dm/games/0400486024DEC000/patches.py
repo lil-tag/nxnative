@@ -32,6 +32,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / 60 instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
+    if base == 0x6e6be0: render_scale(ctx)   # v131072 (1.1.1): its site is this build's offset
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority). Its controller's update (main+0x805aa0, v131072) reads the frame's GPU time, subtracts what its cost model predicts at the current size and keeps the residual's trend;
@@ -57,6 +58,24 @@ def dynamic_resolution(ctx):
     fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution) unless state +0x40 (DM_DYNAMIC_RESOLUTION) runs the game\'s choice')
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
+# Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default). main+0x654e70 (v131072) sizes each view: window size x the view's two scales (view +0x5328 and +0x532c, 0.75
+# for the scene: 1536x864 docked), clamped to 8..32768 and floored to the view's alignment, and hands the game's upscaler the ratio it gets. The stub multiplies both scales right after they load, so every
+# path through the function gets the factor (x10, s6 and the flags are dead at main+0x654ef8: each is set again before it is read). 1.0 = bit-exact original; above 1.0 the 3D views are drawn larger than
+# the game's own top size (1.25 = 1920x1080), which the dynamic resolution hold above keeps at its full size
+def render_scale(ctx):
+    here, emit = ctx.here, ctx.emit
+    ctx.site(0x654ef8, 'e70700b5')   # cbnz x7,main+0x654ff4
+    start = here(); emit(ADRP(10, here(), ctx.state))
+    for w in (0xbd401146,   # ldr s6,[x10,#0x10]   render scale
+              0x1e2020c8,   # fcmp s6,#0.0
+              0x5400006d,   # b.le skip (+12)      not set
+              0x1e260800,   # fmul s0,s0,s6
+              0x1e260821,   # fmul s1,s1,s6
+              0xb4000047):  # skip: cbz x7,+8      (original, out of cbnz range from here)
+        emit(w)
+    emit(B(here(), 0x654ff4)); emit(B(here(), 0x654efc))
+    ctx.put(0x654ef8, [B(0x654ef8, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
+
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0
      'others': {'dynamic resolution': {'size': 0x294, 'fingerprints': ['7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7']}}},   # v131072 main+0x8065e0
@@ -69,4 +88,7 @@ BINDING = [
     {'what': 'dynamic resolution held at full size', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function, found by its function's fingerprint on any build that keeps the function; switchable (DM_DYNAMIC_RESOLUTION)",
      'checked': 'v131072 main: one function with this fingerprint (a leaf, x16 / x17 free), its callers and the controller read by disassembly (2026-11-08)'},
+    {'what': 'render scale', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "a stub in the game's own view sizing function, at v131072's offset",
+     'kept': 'one released build so far', 'checked': 'version 1.1.1: scene sizes at each factor read from the pass log'},
 ]
