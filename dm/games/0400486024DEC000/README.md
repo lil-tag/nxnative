@@ -11,6 +11,7 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
 | `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
 | `gpu_timestamps segment` | `game.tsv` | the game's dynamic resolution decides from GPU timestamps, and with one time per submission it never lowers its resolution ([why](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)) |
+| `gpu_ts_hz 31250000` | `game.tsv` | the game turns the difference of two raw counter reports into its wind and particle time step at the Switch 2's system counter rate: at NVN's 614.4 MHz its foliage, falling leaves and hanging plants moved 19.66 times too fast ([why](../../../docs/reference/frame-rate.md#a-game-that-reads-raw-timestamp-reports-at-another-rate)) |
 | `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution |
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
@@ -95,6 +96,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
 - [A fixed frame step plays in slow motion on a slow Mac](../../../docs/reference/frame-rate.md#a-fixed-frame-step-plays-in-slow-motion-on-a-slow-mac): the frame-ratio division.
 - [Frame-step stubs placed by their function](../../../docs/reference/rewriter.md#frame-step-stubs-placed-by-their-function)
 
+- [A game that reads raw timestamp reports at another rate](../../../docs/reference/frame-rate.md#a-game-that-reads-raw-timestamp-reports-at-another-rate): foliage, falling leaves and hanging plants moving about 20 times too fast ("heavy wind on all moving elements", issue #1326).
 - [Position invariance across shaders](../../../docs/reference/shaders.md#position-invariance-across-shaders): white shapes on plants and bushes for single frames in Kokiri Forest, from the foliage's mesh pre-pass and mesh colour pass rounding the position apart.
 - [GPU event waits order work across queues](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues): the lighting producer-to-consumer dependency is proven in native SDK code and 297 live traced frames; the halo disappears when it is honored.
 - [Conditional rendering survives queue continuations](../../../docs/reference/rendering.md#conditional-rendering-survives-queue-continuations): event/fence splits lost disabled draws and pending counter values, causing the remaining patchy scene flashes.
