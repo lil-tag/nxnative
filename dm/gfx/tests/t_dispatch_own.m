@@ -53,7 +53,7 @@ int main(void) { @autoreleasepool {
             mtl_sub_fill((uint64_t)mem, 1024, 0);
             p_dispatch dp = {.x=(int)counts[0], .y=(int)counts[1], .z=(int)counts[2]};
             if (indirect) { dp.ind = (uint64_t)mem + 2048; dp.x = dp.y = dp.z = 99; }
-            dispatch(&dp);
+            dispatch(&dp, NULL);   // next: no following command to look ahead to
             uint64_t fence = mtl_sub_commit(); CHECK(mtl_wait(fence, 2000000000ull), "dispatch completes"); mtl_drain();
             CHECK(!mtl_last_commit_error(), "no GPU error");
             const uint32_t *out = mem; int pixels = 1, dimensions = 1;
