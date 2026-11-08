@@ -8118,8 +8118,7 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
     if (ps) { atomic_fetch_add(&g_cps_built, 1); atomic_fetch_add(&g_cps_build_ns, bp_now() - t1); cps_harvest(d, 0); }
     return ps;
 }
-// Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned; g_arch_flush_ok: the last one wrote its file
-static int g_arch_flush_ok;
+// Writes one flush period's captures as the next file of the archive, on g_arch_q once every compile in the period has returned
 static int g_arch_keep;   // DM_PSO_PREBUILD=extra: every file is a p<seq> file, which compaction leaves alone: most of its pipelines are named by no prewarm list yet, and compaction drops those from plain files
 static void arch_compact_finish(void);
 static void arch_write_file(ArchEpoch *ep);
@@ -8740,7 +8739,7 @@ static void pre_cs(NSString *key) {
         id ps = nil; int found = 1;
         for (id<MTL4Archive> a in g_arch4p) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) break;
         if (!ps) for (id<MTL4Archive> a in g_arch4) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) break;
-        if (!ps) { found = 0; ps = arch_capture_cs(d, &e); }
+        if (!ps) { found = 0; ps = arch_capture_cs(d, &e, NULL); }
         px_done(ps, found, e, [NSString stringWithFormat:@"compute pipeline %@", key]);
     }
 }
