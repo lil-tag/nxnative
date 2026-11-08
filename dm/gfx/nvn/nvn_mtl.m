@@ -8148,7 +8148,7 @@ static id<MTL4Compiler> g_comp4;
 // themselves). A base with a layout is looked up in g_arch4 alone: each file a lookup misses in costs about 0.06 ms, and a cold start's misses were for such bases, in the 13 prebuilt files
 static NSArray<id<MTL4Archive>> *g_arch4, *g_arch4p; static NSString *g_arch_dir; static int g_arch_seq;
 // Compaction: every start writes a file or more (each flush captures only what is new), Breath of the Wild 5-7 per start, and each file a base is not in costs a lookup about 0.06 ms.
-// With more than PSO_ARCH_COMPACT files of bases with a vertex layout, the bases the prewarm takes from them are captured again from the original shader functions, so the flush
+// With more than PSO_ARCH_COMPACT files of bases with a vertex layout (counted past the last compaction's own files: arch_compacted_files), the bases the prewarm takes from them are captured again from the original shader functions, so the flush
 // after the prewarm writes them into one file, or one per ARCH_PERIOD_MAX of them; once every period that may hold them is written, the old files are removed (open archives stay
 // usable for the rest of the run). Bases the prewarm did not take (pso_user.tsv never named them) go with them and are built again when drawn. The prebuild's files (p<seq>) are
 // left as they are
@@ -8170,6 +8170,17 @@ static int arch_compact_allowed(void) {
     unlink(arch_compact_marker().fileSystemRepresentation);   // another system build or capture method: try once more
     return 1;
 }
+// What the last compaction wrote (the compacted marker, "files\t<n>"): the oldest n files of bases with a vertex layout are its output, and a compaction is worth running again
+// only when the files flushed since then are more than PSO_ARCH_COMPACT and hold at least a quarter of its bytes. Without the marker (no compaction yet) the file count alone
+// decides, as before. Ocarina of Time's compaction writes 6 files of about 11,300 bases (ARCH_PERIOD_MAX each) and every start flushes a few small files on top of them, so the
+// count alone compacted at every start: 11,300 bases built again from their functions, 200 s of every core and 1.2 GB written, to merge a few MB (the prewarm's 'Preparing
+// shaders' at each start of the Mac app)
+static NSString *arch_compacted_marker(void) { return [g_arch_dir stringByAppendingPathComponent:@"compacted"]; }
+static int arch_compacted_files(void) {
+    NSString *m = [NSString stringWithContentsOfFile:arch_compacted_marker() encoding:NSUTF8StringEncoding error:nil];
+    return m && [m hasPrefix:@"files\t"] ? [m substringFromIndex:6].intValue : 0;
+}
+static _Atomic int g_compact_written;   // files the running compaction wrote (arch_write_file), for the marker
 static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, g_arch_sched;   // bases captured and not written yet, those of them with a vertex layout
 // A flush period: a compiler of its own and the serializer it captures into. A compile the archive captures joins the current period (ep_enter) and leaves it when it returns; a
 // flush (arch_flush) hands the compiles after it to a new period and writes the old period's serializer once every compile in it has returned (arch_write), and that serializer is
@@ -8410,7 +8421,12 @@ static void pso4_init(void) {
                 g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf].intValue + 1);
             }
             arch_open_end();
-            if (runf.count > PSO_ARCH_COMPACT && arch_compact_allowed()) { g_compact_enabled = 1; g_compact_files = runf; }
+            int last = arch_compacted_files(), flushed = (int)runf.count - last; unsigned long long fb = 0, cb = 0;   // runf is newest first: the last compaction's files are its tail
+            for (int i = 0; i < (int)runf.count; i++) { unsigned long long sz = [[NSFileManager.defaultManager attributesOfItemAtPath:runf[i] error:nil] fileSize]; if (i < flushed) fb += sz; else cb += sz; }
+            int worth = last <= 0 ? runf.count > PSO_ARCH_COMPACT : flushed > PSO_ARCH_COMPACT && fb * 4 >= cb;
+            if (worth && arch_compact_allowed()) { g_compact_enabled = 1; g_compact_files = runf; }
+            else if (runf.count > PSO_ARCH_COMPACT) MLOG("pipeline archive: %lu files of bases with a vertex layout, %d of them the last compaction's (%.0f MB) and %d flushed since (%.0f MB): not compacted, their bases would be built again",
+                                                       (unsigned long)runf.count, MIN(last, (int)runf.count), cb / 1048576.0, MAX(flushed, 0), fb / 1048576.0);
             MLOG("pipeline archive %s: %lu files (%lu of bases without a vertex layout), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String, (unsigned long)(arch.count + archp.count - (g_arch_bundle != nil)),
                  (unsigned long)archp.count - (g_arch_bundle != nil), bytes / 1048576.0, (bp_now() - t0) / 1e6);
         }
@@ -8493,6 +8509,7 @@ static void arch_write_file(ArchEpoch *ep) {
     ok = ok && !rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation);
     if (!ok) { MLOG("[RED] pipeline archive: writing %s failed%s%s", path.UTF8String, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); unlink(tmp.fileSystemRepresentation); if (ep->compacting) g_compact_bad = 1; }
     else {
+        if (ep->compacting) atomic_fetch_add(&g_compact_written, 1);
         MLOG("pipeline archive: %d new pipeline bases%s written to %s (%.1f MB, %.0f ms)", n - cs, cs ? [NSString stringWithFormat:@" and %d compute pipelines", cs].UTF8String : "", path.lastPathComponent.UTF8String,
              [[NSFileManager.defaultManager attributesOfItemAtPath:path error:nil] fileSize] / 1048576.0, (bp_now() - t0) / 1e6);
     }
@@ -8532,6 +8549,7 @@ static void arch_compact_finish(void) {   // after every period that may hold re
     if (!g_compact_files || !g_compacted) return;
     if (g_compact_bad) { MLOG("[RED] pipeline archive: compaction left the old files (a flush failed, or a base was not captured again)"); return; }
     for (NSString *f in g_compact_files) unlink(f.fileSystemRepresentation);
+    [[NSString stringWithFormat:@"files\t%d\n", atomic_load(&g_compact_written)] writeToFile:arch_compacted_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     MLOG("pipeline archive compacted: %lu files of bases with a vertex layout gave %d bases to the files just written and were removed", (unsigned long)g_compact_files.count, (int)g_compacted);
     g_compact_files = nil;
 }
