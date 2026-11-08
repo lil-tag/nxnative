@@ -8155,6 +8155,8 @@ static NSArray<id<MTL4Archive>> *g_arch4, *g_arch4p; static NSString *g_arch_dir
 enum { PSO_ARCH_COMPACT = 8 };
 static int g_compact_enabled;   // immutable after pso4_init; unlike g_compact_files, never cleared by the archive queue
 static NSArray<NSString *> *g_compact_files; static _Atomic int g_compacted;
+static NSArray<id<MTL4Archive>> *g_compact_arch; static int g_compact_keep;   // the archives whose bases the compaction captures again (the files of g_compact_files), and the files it keeps (the last compaction's)
+enum { PSO_ARCH_FULL = 48 };   // files of bases with a vertex layout past which every file is compacted, the last compaction's included (each file a lookup misses in costs about 0.06 ms)
 // g_compact_periods: periods that may hold recaptured bases, handed over and not written yet; g_compact_closed: the last of them is handed over (the first flush after the prewarm);
 // g_compact_bad: one was not written, or a base the prewarm took from an old file was not captured again: the old files stay (arch_compact_finish)
 static _Atomic int g_compact_periods, g_compact_closed, g_compact_bad;
@@ -8171,8 +8173,8 @@ static int arch_compact_allowed(void) {
     return 1;
 }
 // What the last compaction wrote (the compacted marker, "files\t<n>"): the oldest n files of bases with a vertex layout are its output, and a compaction is worth running again
-// only when the files flushed since then are more than PSO_ARCH_COMPACT and hold at least a quarter of its bytes. Without the marker (no compaction yet) the file count alone
-// decides, as before. Ocarina of Time's compaction writes 6 files of about 11,300 bases (ARCH_PERIOD_MAX each) and every start flushes a few small files on top of them, so the
+// only for the files flushed since then once they are more than PSO_ARCH_COMPACT (tail compaction: its own files stay, and the marker then counts them with the new one), or for
+// every file past PSO_ARCH_FULL. Without the marker (no compaction yet) the file count alone decides, as before. Ocarina of Time's compaction writes 6 files of about 11,300 bases (ARCH_PERIOD_MAX each) and every start flushes a few small files on top of them, so the
 // count alone compacted at every start: 11,300 bases built again from their functions, 200 s of every core and 1.2 GB written, to merge a few MB (the prewarm's 'Preparing
 // shaders' at each start of the Mac app)
 static NSString *arch_compacted_marker(void) { return [g_arch_dir stringByAppendingPathComponent:@"compacted"]; }
@@ -8423,10 +8425,15 @@ static void pso4_init(void) {
             arch_open_end();
             int last = arch_compacted_files(), flushed = (int)runf.count - last; unsigned long long fb = 0, cb = 0;   // runf is newest first: the last compaction's files are its tail
             for (int i = 0; i < (int)runf.count; i++) { unsigned long long sz = [[NSFileManager.defaultManager attributesOfItemAtPath:runf[i] error:nil] fileSize]; if (i < flushed) fb += sz; else cb += sz; }
-            int worth = last <= 0 ? runf.count > PSO_ARCH_COMPACT : flushed > PSO_ARCH_COMPACT && fb * 4 >= cb;
-            if (worth && arch_compact_allowed()) { g_compact_enabled = 1; g_compact_files = runf; }
-            else if (runf.count > PSO_ARCH_COMPACT) MLOG("pipeline archive: %lu files of bases with a vertex layout, %d of them the last compaction's (%.0f MB) and %d flushed since (%.0f MB): not compacted, their bases would be built again",
-                                                       (unsigned long)runf.count, MIN(last, (int)runf.count), cb / 1048576.0, MAX(flushed, 0), fb / 1048576.0);
+            // No marker (no compaction yet) or too many files in all: every file is compacted, as before. Else only the files flushed since the last compaction are: their bases
+            // are few (what play met since), the last compaction's files stay and the marker counts them with the new one. Ocarina of Time compacted its 11,300 bases at every start
+            int full = last <= 0 ? runf.count > PSO_ARCH_COMPACT : runf.count > PSO_ARCH_FULL, tail = !full && last > 0 && flushed > PSO_ARCH_COMPACT;
+            if ((full || tail) && arch_compact_allowed()) {
+                g_compact_enabled = 1; g_compact_keep = tail ? MIN(last, (int)runf.count) : 0;
+                NSRange r = NSMakeRange(0, tail ? (NSUInteger)flushed : runf.count);
+                g_compact_files = [runf subarrayWithRange:r]; g_compact_arch = [arch subarrayWithRange:r];   // arch and runf grew together: the same files, newest first
+                MLOG("pipeline archive: compacting %lu files of bases with a vertex layout%s (%.0f MB)", (unsigned long)r.length, tail ? " flushed since the last compaction, whose files stay" : "", (tail ? fb : fb + cb) / 1048576.0);
+            }
             MLOG("pipeline archive %s: %lu files (%lu of bases without a vertex layout), %.1f MB, opened in %.1f ms", g_arch_dir.UTF8String, (unsigned long)(arch.count + archp.count - (g_arch_bundle != nil)),
                  (unsigned long)archp.count - (g_arch_bundle != nil), bytes / 1048576.0, (bp_now() - t0) / 1e6);
         }
@@ -8478,7 +8485,7 @@ static id<MTLComputePipelineState> cps_new(id<MTLFunction> f, NSError **e) {
         if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
         else for (id<MTL4Archive> a in g_arch4) if ((ps = [a newComputePipelineStateWithDescriptor:d error:nil])) {   // arch_capture_cs writes them to plain files only
             atomic_fetch_add(&g_cps_run, 1);
-            if (g_compact_enabled && atomic_load(&g_warm_running)) cps_harvest(d, 1);
+            if (g_compact_enabled && atomic_load(&g_warm_running) && g_compact_arch && [g_compact_arch containsObject:a]) cps_harvest(d, 1);   // from a file the compaction replaces
             break;
         }
         atomic_fetch_add(&g_cps_look_ns, bp_now() - t0);
@@ -8549,7 +8556,7 @@ static void arch_compact_finish(void) {   // after every period that may hold re
     if (!g_compact_files || !g_compacted) return;
     if (g_compact_bad) { MLOG("[RED] pipeline archive: compaction left the old files (a flush failed, or a base was not captured again)"); return; }
     for (NSString *f in g_compact_files) unlink(f.fileSystemRepresentation);
-    [[NSString stringWithFormat:@"files\t%d\n", atomic_load(&g_compact_written)] writeToFile:arch_compacted_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [[NSString stringWithFormat:@"files\t%d\n", g_compact_keep + atomic_load(&g_compact_written)] writeToFile:arch_compacted_marker() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     MLOG("pipeline archive compacted: %lu files of bases with a vertex layout gave %d bases to the files just written and were removed", (unsigned long)g_compact_files.count, (int)g_compacted);
     g_compact_files = nil;
 }
@@ -8662,7 +8669,7 @@ static id<MTLRenderPipelineState> pso_build_ex(MTLRenderPipelineDescriptor *d, N
         int vd = 0; for (int i = 0; i < 31 && !vd; i++) vd = bk.va[i][0] != 0;   // a vertex layout (MTLVertexFormatInvalid is 0)
         if (!vd) for (id<MTL4Archive> a in g_arch4p) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) break;
         int from_run = 0;
-        if (!base) for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) { from_run = 1; break; }
+        if (!base) for (id<MTL4Archive> a in g_arch4) if ((base = [a newRenderPipelineStateWithDescriptor:b error:nil])) { from_run = g_compact_arch && [g_compact_arch containsObject:a]; break; }   // from a file the compaction replaces
         uint64_t t1 = bp_now();
         if (base) { g_pb_archived++; g_pt_hit_n++; g_pt_hit_ns += t1 - t0; }
         if (base && from_run && g_compact_enabled && atomic_load(&g_warm_running)) {
