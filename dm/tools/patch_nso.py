@@ -1538,6 +1538,7 @@ obs += region_obs
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
+FIXED_RESOLUTION = 0   # 1 = the build has a fixed-resolution stub (state +0x60 / +0x64): the fixups table says so (FIXED_RESOLUTION), and the launcher offers DM_FIXED_RESOLUTION / DM_FIXED_SCALE
 if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
@@ -1555,8 +1556,8 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
         cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why + (' [function match]' if FS_MATCH else ''))); stat('frame_step')
 if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
-    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, base=FS_MATCH[1] if FS_MATCH else 0)
-    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale
+    use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=fs_site, put=fs_put, state=FS_STATE_OFF, render_scale=0, fixed_resolution=0, base=FS_MATCH[1] if FS_MATCH else 0)
+    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; FIXED_RESOLUTION = fs.fixed_resolution
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1890,7 +1891,8 @@ with open(P('fixups.tsv'), 'w') as f:
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
     if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n# UE_FIXED_RATE_FLAG\t{UE_FIXED_FLAG:#x}\n')   # Unreal's GEngine, UEngine::FixedFrameRate and bUseFixedFrameRate (ue_fixed_rate.py)
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
-    if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
+    if RENDER_SCALE: f.write('# RENDER_SCALE\t1\n')
+    if FIXED_RESOLUTION: f.write('# FIXED_RESOLUTION\t1\n')   # a fixed-resolution stub reads state +0x60 / +0x64 (dm/games/settings.py offers DM_FIXED_RESOLUTION and DM_FIXED_SCALE by it)   # a render-scale stub reads state +0x10 (the loader ignores the key; dm/games/settings.py offers the setting by it)
     if NAME == 'main':
         for capability in PATCHES['CAPABILITIES'].get(BUILD_ID, ()):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'

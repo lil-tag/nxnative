@@ -315,6 +315,15 @@ void dm_fps_state_apply(void) {
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    // Fixed resolution (the builds with a fixed-resolution stub, Ocarina of Time v131072: dm/games/0400486024DEC000/patches.py): DM_FIXED_RESOLUTION=1 makes the game's resolution
+    // controller take its own "dynamic resolution disabled" path, the 3D at its top size, and DM_FIXED_SCALE (0.5 to 1.0) sets that path's scale; state +0x60 u32, +0x64 the scale's
+    // float bits (0 = the game's 1.0). Independent of the frame step and of DM_RENDER_SCALE (which still caps a dynamic resolution)
+    const char *fr = getenv("DM_FIXED_RESOLUTION"); uint32_t fixed = fr && atoi(fr) == 1; float fsc = 0;
+    const char *fs = getenv("DM_FIXED_SCALE");
+    if (fs && *fs) { char *end; fsc = strtof(fs, &end); if (end == fs || *end || !(fsc >= 0.5f && fsc <= 1.0f)) { LOG("[RED] DM_FIXED_SCALE=%s: must be 0.5 to 1.0; keeping the game's 1.0", fs); fsc = 0; } }
+    if (fsc == 1.0f) fsc = 0;   // the game's own constant
+    memcpy(dm_fps_state + 0x60, &fixed, sizeof fixed); memcpy(dm_fps_state + 0x64, &fsc, sizeof fsc);
+    if (fixed) LOG("%s: fixed resolution: the game's resolution controller takes its disabled path%s", g_fps_mod, fsc ? " at the host's scale" : "");
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9

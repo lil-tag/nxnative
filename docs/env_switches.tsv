@@ -37,6 +37,8 @@ DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
 DM_EXEC_OUT	path	File `oe::ExecuteProgram` records the next program and its parameters in, then the app ends (the iOS app of a game of several programs sets it to `Documents/program.bin`)
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
+DM_FIXED_RESOLUTION	player	`=1` makes a game with a fixed-resolution stub (Ocarina of Time v131072) render its 3D at its top size instead of following its dynamic-resolution controller; the frame rate may drop where the controller would have lowered the size
+DM_FIXED_SCALE	player	`0.5` to `1.0`: with `DM_FIXED_RESOLUTION=1`, the fixed size as a fraction of the top one (the game's own constant is 1.0)
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
 DM_FOCUS_KEEP	switch	`1` keeps the game in focus while its Mac window is up, whichever app is active (minimizing still counts); `scripts/regress.py` sets it, so another app taking the key window during a run does not pause a game that stops out of focus
 DM_FONT_DIR	path	Folder of the shared-font stand-ins (`standard.ttf`, `nintendo_ext.ttf` with the button icons); the app, the Mac launcher and the NSP script set it
@@ -332,6 +334,7 @@ DM_SF_TRACE	diagnostic	`=1` logs every request on the game's own HIPC client ses
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
 DM_SHARED_FONT	path	Font file served for every shared-font type except the Nintendo extension (default `$DM_FONT_DIR/standard.ttf`, then macOS's Arial Unicode)
 DM_SHARED_FONT_EXT	path	Font file served for shared-font type 5, the Nintendo extension with the button icons (default `$DM_FONT_DIR/nintendo_ext.ttf`, made by `make_ext_font.py`)
+DM_SHARPEN	player	`0.05` to `1`: contrast-adaptive sharpening of the picture `DM_UPSCALER=metalfx` or `off` leaves, on its way into the game's image; `0` (the default) none. With the game's own upscaler it does nothing
 DM_SHOW_FPS	player	`1` shows the frame-rate counter on the iPhone (frames put on screen per second, top left); at IPA build it sets `DMShowFPS` in `Info.plist`, which `Documents/env.txt` overrides
 DM_SLOWFRAME	diagnostic	`=1` writes the per-frame timing breakdown to the log only for dropped frames (kept in a ring of the last 16 frames, judged 8 frames late)
 DM_SPIN	switch	`0` makes the rewriter's spin gate return at once, so guest poll loops spin with no sleep; the gate stays (on by default)
@@ -370,7 +373,7 @@ DM_TOUCH_LOG	diagnostic	`=1` logs each touch-screen read with touch points (samp
 DM_UDC_SELFTEST	diagnostic	`=1` runs a start-up check of DontCare load and store on private depth-stencil and RGBA8 textures (clear, Load + DontCare, read back) and logs one result line
 DM_UE_SHADERS	path	Folder of the Unreal shader code archives decoded by `uepak.py`, for `shader_split.py` (default `ue_shaders` beside the RomFS); needed when the RomFS has Unreal paks
 DM_UE_TEXTURE_POOL	switch	Megabytes Unreal's texture streaming pool (`r.Streaming.PoolSize`) is raised to, overriding the profile's `ue_texture_pool`; `0` keeps the game's own pool. On iOS only this switch turns it on (`Documents/env.txt`)
-DM_UPSCALER	player	`metalfx` draws the game's own upscaler shaders (agl's NDSR network, found by the shader map) with MetalFX's spatial scaler; `game` (the default) runs them
+DM_UPSCALER	player	`metalfx` draws the game's own upscaler shaders (agl's NDSR network, found by the shader map) with MetalFX's spatial scaler; `off` skips them and draws their input bilinearly into their output (no sharpening at all); `game` (the default) runs them
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)

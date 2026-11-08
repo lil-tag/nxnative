@@ -13466,32 +13466,34 @@ static int fmt_int_or_ds(MTLPixelFormat f) {
     }
 }
 // square: each colour channel drawn as c * |c| (the upscaler swap's root-encoded input into linear colour, up_mfx_encode)
-static int copy_t2t_draw_sq(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror, int square) {
-    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fq, fd, fds; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
+// sharpen > 0: the copy is drawn through fsh (contrast-adaptive sharpening of that amount, 0-1; DM_SHARPEN), colour only, source and destination the same size
+static int copy_t2t_draw_x(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror, int square, float sharpen) {
+    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff, fq, fd, fds, fsh; static id<MTLSamplerState> samp[2]; static id<MTL4ArgumentTable> at; static id<MTLDepthStencilState> dss, dss_s; static int failed;
     if (failed || sr->width <= 0 || sr->height <= 0 || dr->width <= 0 || dr->height <= 0) return 0;
     int depth = (s.pixelFormat == MTLPixelFormatDepth32Float || s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || s.pixelFormat == MTLPixelFormatDepth16Unorm) && d.pixelFormat == s.pixelFormat, stencil = depth && d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8;
     if (!depth && (fmt_int_or_ds(s.pixelFormat) || fmt_int_or_ds(d.pixelFormat))) return 0;
     if (mtl_fmt_block(d.pixelFormat) || !(d.usage & MTLTextureUsageRenderTarget) || s.sampleCount > 1 || d.sampleCount > 1) return 0;
     if (!pso) {
         NSError *e = nil; id<MTLLibrary> lib = host_lib("copy", &e);
-        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fq = [lib newFunctionWithName:@"fsq"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"];
+        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"]; fq = [lib newFunctionWithName:@"fsq"]; fd = [lib newFunctionWithName:@"fsd"]; fds = [lib newFunctionWithName:@"fsds"]; fsh = [lib newFunctionWithName:@"fsh"];
         MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = YES; dss = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTLStencilDescriptor *sd_ = [MTLStencilDescriptor new]; sd_.stencilCompareFunction = MTLCompareFunctionAlways; sd_.depthStencilPassOperation = MTLStencilOperationReplace;   // Replace writes the [[stencil]] output
         dd.frontFaceStencil = dd.backFaceStencil = sd_; dss_s = [g_dev newDepthStencilStateWithDescriptor:dd];
         MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 2; ad.maxSamplerStateBindCount = 1; ad.maxBufferBindCount = 1; at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
         for (int i = 0; i < 2; i++) { MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = i ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
             sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge; sd.supportArgumentBuffers = YES; samp[i] = [g_dev newSamplerStateWithDescriptor:sd]; }
-        if (!vf || !ff || !fq || !fd || !fds || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
+        if (!vf || !ff || !fq || !fd || !fds || !fsh || !dss || !dss_s || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] cannot create the pipelines for format-converting / scaling texture copies: %s", e.localizedDescription.UTF8String); return 0; }
         pso = [NSMutableDictionary dictionary];
     }
     // Stencil: read through a stencil-only view of the source (one per layer below); without one it is cleared to 0
     id<MTLTexture> stv0 = stencil && s.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? [s newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8 textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset, 1)] : nil;
     int scopy = stv0 != nil;
     square = square && !depth;
-    NSNumber *pk = @((d.pixelFormat * 2 + scopy) * 2 + square);
+    int sharp = sharpen > 0 && !depth; if (sharp) square = 0;
+    NSNumber *pk = @(((d.pixelFormat * 2 + scopy) * 2 + square) * 2 + sharp);
     id<MTLRenderPipelineState> ps = pso[pk];
     if (!ps) {
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : square ? fq : ff;
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = depth ? (scopy ? fds : fd) : sharp ? fsh : square ? fq : ff;
         if (depth) { pd.depthAttachmentPixelFormat = d.pixelFormat; if (stencil) pd.stencilAttachmentPixelFormat = d.pixelFormat; } else pd.colorAttachments[0].pixelFormat = d.pixelFormat;
         NSError *e = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!ps) { RED_ONCE(83, "format-converting / scaling texture copy: cannot create the pipeline for destination format %lu: %s", (unsigned long)d.pixelFormat, e.localizedDescription.UTF8String); return 0; }
@@ -13503,12 +13505,12 @@ static int copy_t2t_draw_sq(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, uns
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     for (int z = 0; z < nz; z++) {
         id<MTLTexture> sv = [s newTextureViewWithPixelFormat:s.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(sl, 1) slices:NSMakeRange(ss + sr->zoffset + z, 1)];
-        id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
+        id<MTLBuffer> pb; size_t po = arena_alloc(48, &pb);   // parameters in the frame arena (resident already): a fresh 32-byte buffer per copy was a residency add, a commit and a release (Link's Awakening, about 11 a frame)
         if (!sv || !pb) { RED_ONCE(84, "format-converting / scaling texture copy: cannot create the source view / argument block"); return z > 0; }
         float *p = (float *)((uint8_t *)pb.contents + po); p[0] = sr->xoffset; p[1] = sr->yoffset; p[2] = (float)sr->width / dr->width; p[3] = (float)sr->height / dr->height;
         if (mirror & NVN_COPY_FLAGS_MIRROR_X_BIT) { p[0] += sr->width; p[2] = -p[2]; }   // mirrored: walk the source region from its far edge
         if (mirror & NVN_COPY_FLAGS_MIRROR_Y_BIT) { p[1] += sr->height; p[3] = -p[3]; }
-        p[4] = dr->xoffset; p[5] = dr->yoffset; p[6] = sw; p[7] = sh;
+        p[4] = dr->xoffset; p[5] = dr->yoffset; p[6] = sw; p[7] = sh; p[8] = sharpen; p[9] = p[10] = p[11] = 0;
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
         MTLRenderPassAttachmentDescriptor *a = depth ? (MTLRenderPassAttachmentDescriptor *)rp.depthAttachment : (MTLRenderPassAttachmentDescriptor *)rp.colorAttachments[0];
         int whole = !dr->xoffset && !dr->yoffset && (unsigned)dr->width == dw && (unsigned)dr->height == dh;   // the copy draws every pixel of the level (no blending, no discard): its old content is not loaded (Link's Awakening copies its scene this way every frame)
@@ -13529,8 +13531,11 @@ static int copy_t2t_draw_sq(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, uns
                                                     linear && !depth ? " (bilinear)" : "", stencil ? (scopy ? " (depth + stencil)" : " (no stencil view possible, cleared to 0)") : ""); }
     return 1;
 }
+static int copy_t2t_draw_sq(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror, int square) {
+    return copy_t2t_draw_x(s, d, sl, ss, dl, ds, sr, dr, linear, mirror, square, 0);
+}
 static int copy_t2t_draw(id<MTLTexture> s, id<MTLTexture> d, unsigned sl, unsigned ss, unsigned dl, unsigned ds, const NVNcopyRegion *sr, const NVNcopyRegion *dr, int linear, int mirror) {
-    return copy_t2t_draw_sq(s, d, sl, ss, dl, ds, sr, dr, linear, mirror, 0);
+    return copy_t2t_draw_x(s, d, sl, ss, dl, ds, sr, dr, linear, mirror, 0, 0);
 }
 static int ndve_direct_draw(NvShader *cs) {
     id<MTLTexture> in = g_ndve_decoded;
@@ -14847,11 +14852,32 @@ void mtl_up_mfx_stats(uint64_t *n, uint64_t *kept) { *n = g_up_mfx_n; *kept = g_
 static int up_mfx_on(void) {
     static int v = -1;
     if (v >= 0) return v;
-    const char *e = getenv("DM_UPSCALER"); v = e && !strcmp(e, "metalfx");
-    if (e && *e && strcmp(e, "metalfx") && strcmp(e, "game")) MLOG("[RED] DM_UPSCALER=%s: metalfx or game; keeping the game's", e);
-    if (v && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("upscaler: this GPU has no Metal 4 MetalFX spatial scaler; the game's own upscaler draws"); v = 0; }
-    if (v) MLOG("upscaler (DM_UPSCALER): metalfx, the game's upscaler shaders (%d, from the shader map) are drawn by MetalFX's spatial scaler", DM_GAME_UPSCALER_N);
+    const char *e = getenv("DM_UPSCALER"); v = e && !strcmp(e, "metalfx") ? 1 : e && !strcmp(e, "off") ? 2 : 0;   // 1 MetalFX draws, 2 the network is skipped: its input drawn bilinearly into its output (no sharpening at all)
+    if (e && *e && !v && strcmp(e, "game")) MLOG("[RED] DM_UPSCALER=%s: metalfx, off or game; keeping the game's", e);
+    if (v == 1 && !(g_q4 && [MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev])) { MLOG("upscaler: this GPU has no Metal 4 MetalFX spatial scaler; the game's own upscaler draws"); v = 0; }
+    if (v) MLOG("upscaler (DM_UPSCALER): %s, the game's upscaler shaders (%d, from the shader map) are %s", v == 1 ? "metalfx" : "off", DM_GAME_UPSCALER_N,
+                v == 1 ? "drawn by MetalFX's spatial scaler" : "skipped: their input is drawn bilinearly into their output, with none of the network's sharpening");
     return v;
+}
+// DM_SHARPEN=0..1: contrast-adaptive sharpening of the upscaled picture on its way into the game's image, after MetalFX or after the skip (0, the default: none; the game's own network keeps its own)
+static float up_sharpen(void) {
+    static float v = -1;
+    if (v >= 0) return v;
+    const char *e = getenv("DM_SHARPEN"); v = e && *e ? (float)atof(e) : 0;
+    if (v < 0 || v > 1) { MLOG("[RED] DM_SHARPEN=%s: 0 to 1; sharpening off", e); v = 0; }
+    if (v > 0) MLOG("upscaler sharpening (DM_SHARPEN): %.2f, applied after %s", v, up_mfx_on() == 1 ? "MetalFX" : up_mfx_on() == 2 ? "the skipped network" : "nothing: the game's own upscaler runs (DM_UPSCALER=game), so it does not apply");
+    return v;
+}
+// A scratch RGBA16F picture of the output size for the skip with sharpening: the bilinear draw lands here, the sharpening draw reads it
+static id<MTLTexture> up_scratch(NSUInteger w, NSUInteger h) {
+    static id<MTLTexture> t;
+    if (t && (t.width != w || t.height != h)) { res_remove(t); defer_obj_release(t); t = nil; }
+    if (!t) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:w height:h mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; t = [g_dev newTextureWithDescriptor:td];
+        if (t) { t.label = @"upscaler skip scratch"; res_add(t); res_commit(); }
+    }
+    return t;
 }
 // The colour a variant of the network takes and writes, from the sRGB curves in its code (their constants are immediates, whole bytes in the code). The variants differ inside a pack, so this is the shader's and not the game's:
 // Bananza's all encode linear input (0.0031308, 1 / 2.4 as floats) and come in threes: no decode at the end (the output stays encoded), a decode clamped to 0-1, a decode up to 128. Splatoon Raiders' all read colour that is encoded
@@ -14975,13 +15001,27 @@ static int up_mfx_encode(NvShader *cs) {
     if (!in || !out || in == out || in.textureType != MTLTextureType2D || out.textureType != MTLTextureType2D || in.sampleCount != 1 || out.sampleCount != 1 ||
         fmt_int_or_ds(in.pixelFormat) || fmt_int_or_ds(out.pixelFormat) || mtl_fmt_block(out.pixelFormat) || !up_mfx_rect(v, in.width, in.height, &ir) || !up_mfx_rect(v + 4, out.width, out.height, &orr) ||
         orr.width < ir.width || orr.height < ir.height || (orr.width == ir.width && orr.height == ir.height)) { g_up_mfx_kept++; return 0; }
-    int srgb = cs->up_color == UP_COLOR_SRGB, root = cs->up_color == UP_COLOR_ROOT;
+    int srgb = cs->up_color == UP_COLOR_SRGB, root = cs->up_color == UP_COLOR_ROOT; float sharpen = up_sharpen();
+    if (up_mfx_on() == 2) {   // the network skipped: its input rectangle drawn bilinearly into its output rectangle (a root-encoded input squared into linear colour, as MetalFX's path does), sharpened on request
+        if (srgb || !(out.usage & MTLTextureUsageRenderTarget)) { g_up_mfx_kept++; return 0; }   // an sRGB-encoded input would need decoding: the game's shader draws
+        zskip_del(dout.serial);
+        rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        ubd_land_compute();
+        NVNcopyRegion at0o = {0, 0, 0, orr.width, orr.height, 1};
+        id<MTLTexture> scratch = sharpen > 0 ? up_scratch((NSUInteger)orr.width, (NSUInteger)orr.height) : nil;
+        int ok = scratch ? copy_t2t_draw_sq(in, scratch, 0, 0, 0, 0, &ir, &at0o, 1, 0, root) && copy_t2t_draw_x(scratch, out, 0, 0, 0, 0, &at0o, &orr, 0, 0, 0, sharpen)
+                         : copy_t2t_draw_sq(in, out, 0, 0, 0, 0, &ir, &orr, 1, 0, root);
+        args_dirty_all();
+        if (!ok) { g_up_mfx_kept++; return 0; }
+        if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s skipped, %dx%d drawn bilinearly into %dx%d%s%s", cs->key, ir.width, ir.height, orr.width, orr.height, root ? ", squared into linear colour" : "", sharpen > 0 ? ", then sharpened" : "");
+        return 1;
+    }
     up_mfx_scaler *e = up_mfx_scaler_for((NSUInteger)ir.width, (NSUInteger)ir.height, (NSUInteger)orr.width, (NSUInteger)orr.height, cs->up_color); if (!e) { g_up_mfx_kept++; return 0; }
     id<MTL4FXSpatialScaler> sc = e->sc;
     // Straight in and out when MetalFX can take the game's textures as they are; through the scaler's own textures otherwise
     int direct = !srgb && !root && (NSUInteger)ir.width == in.width && (NSUInteger)ir.height == in.height && out.storageMode == MTLStorageModePrivate &&
                  in.pixelFormat == MTLPixelFormatRGBA16Float && out.pixelFormat == MTLPixelFormatRGBA16Float && !ir.xoffset && !ir.yoffset && !orr.xoffset && !orr.yoffset && (NSUInteger)orr.width == out.width &&
-                 (NSUInteger)orr.height == out.height && (in.usage & sc.colorTextureUsage) == sc.colorTextureUsage && (out.usage & sc.outputTextureUsage) == sc.outputTextureUsage;
+                 (NSUInteger)orr.height == out.height && (in.usage & sc.colorTextureUsage) == sc.colorTextureUsage && (out.usage & sc.outputTextureUsage) == sc.outputTextureUsage && sharpen <= 0;   // sharpening draws from the scaler's output
     if (!direct && !(out.usage & MTLTextureUsageRenderTarget)) { g_up_mfx_kept++; return 0; }
     zskip_del(dout.serial);
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
@@ -14999,13 +15039,13 @@ static int up_mfx_encode(NvShader *cs) {
         [sc encodeToCommandBuffer:cb];
     });
     g_last_end_relaxed = 0;   // the next pass waits for the scaler whole (enc_r_begin_pass)
-    if (!direct && !copy_t2t_draw(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, 0)) {
+    if (!direct && !copy_t2t_draw_x(e->read, out, 0, 0, 0, 0, &at0o, &orr, 0, 0, 0, sharpen)) {
         args_dirty_all(); g_up_mfx_kept++; return 0;   // only the scratch image was scaled; the game's shader can still produce the output
     }
     args_dirty_all();
-    if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
+    if (!g_up_mfx_n++) MLOG("upscaler: first dispatch of %s drawn by MetalFX, %dx%d at %d,%d of %lux%lu (format %lu) → %dx%d at %d,%d of %lux%lu (format %lu)%s%s", cs->key, ir.width, ir.height, ir.xoffset, ir.yoffset,
                             (unsigned long)in.width, (unsigned long)in.height, (unsigned long)in.pixelFormat, orr.width, orr.height, orr.xoffset, orr.yoffset, (unsigned long)out.width, (unsigned long)out.height,
-                            (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : root ? ", squared into RGBA16F" : ", through RGBA16F");
+                            (unsigned long)out.pixelFormat, direct ? ", straight" : srgb ? ", through RGBA16F, decoded from sRGB" : root ? ", squared into RGBA16F" : ", through RGBA16F", sharpen > 0 ? ", then sharpened" : "");
     return 1;
 }
 // The present pass: src's valid rectangle drawn into dst (the drawable, or a screenshot's texture) as present_encode draws it, through MetalFX first where fx_encode takes it
