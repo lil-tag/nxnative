@@ -100,7 +100,7 @@ DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: 
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
-DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
+DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory); Window > Metal HUD (cmd-shift-H) shows or hides it while playing, with or without this switch
 DM_MIC	player	`1` lists the Mac's default audio input as the game's microphone (input streams, `hle_audio.c`; macOS asks for permission at the first capture): Ocarina of Time plays the ocarina from it. Off by default; no microphone on iOS
 DM_MIC_DUMP	diagnostic	`=<file>` writes the microphone's frames as the game's stream takes them (after the gain), 16-bit mono 48 kHz raw PCM, to hear what the game hears
 DM_MIC_GAIN	player	`=<x>` multiplies the microphone's frames by x before the game reads them (with `DM_MIC=1`); unset or `0`, the gain follows the loudest of the last seconds (falling 6 dB a second), up to 64 (a Mac's input is quieter than what a Switch's system hands the game)

@@ -555,6 +555,15 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
 - (void)mouseUp:(NSEvent *)e { (void)e; if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); } }
+// Window > Metal HUD (cmd-shift-H): Apple's performance HUD shown or hidden on this layer alone, whatever MTL_HUD_ENABLED says. developerHUDProperties with
+// mode=default shows it (and enables it when the environment did not), an empty dictionary hides it; nil would hand the choice back to the environment
+- (void)toggleMetalHUD:(id)sender {
+    (void)sender;
+    int on = g_layer.developerHUDProperties ? [g_layer.developerHUDProperties[@"mode"] isEqual:@"default"]
+                                            : getenv("MTL_HUD_ENABLED") && atoi(getenv("MTL_HUD_ENABLED"));
+    g_layer.developerHUDProperties = on ? @{} : @{@"mode": @"default"};
+    LOG("front end: Metal performance HUD %s (Window > Metal HUD)", on ? "hidden" : "shown");
+}
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
@@ -1451,7 +1460,7 @@ void front_run(void (*guest)(void)) {
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
-        // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
+        // stay unset until Window > Metal HUD (cmd-shift-H, DmGameView toggleMetalHUD) is used: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
@@ -1484,6 +1493,8 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        NSMenuItem *hud = [wm addItemWithTitle:@"Metal HUD" action:@selector(toggleMetalHUD:) keyEquivalent:@"h"];   // cmd-shift-H; the game view is not a responder, so the target is explicit
+        hud.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift; hud.target = v;
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
