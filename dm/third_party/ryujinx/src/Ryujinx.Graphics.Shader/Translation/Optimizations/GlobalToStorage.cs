@@ -881,7 +881,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             if (resolved)
             {
-                inArgumentsCount = 5;   // the address, then the run's entry (0: none holds the whole run) and its delta (ResolveRawRuns)
+                inArgumentsCount = 6;   // the address, the bind-time site (#1585), then the run's entry (0: none holds the whole run) and its delta (ResolveRawRuns)
             }
 
             EmitterContext context = new();
@@ -912,8 +912,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             if (resolved)
             {
                 Operand lblLookup = Label();
-                context.BranchIfFalse(lblLookup, context.ICompareNotEqual(Argument(2), Const(0)));
-                EmitAccess(Argument(3), Argument(4));
+                context.BranchIfFalse(lblLookup, context.ICompareNotEqual(Argument(3), Const(0)));
+                EmitAccess(Argument(4), Argument(5));
                 context.MarkLabel(lblLookup);
             }
 
@@ -1161,7 +1161,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
                     if (node.Value is not Operation call ||
                         call.Inst != Instruction.Call ||
-                        call.SourcesCount != 3 ||
+                        call.SourcesCount != 4 ||   // the function, the address's two words and the bind-time site (#1585)
                         call.Dest == null ||
                         call.GetSource(0).Type != OperandType.Constant ||
                         !gtsContext.RawLoadFunctions.ContainsKey(call.GetSource(0).Value))
