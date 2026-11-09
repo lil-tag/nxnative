@@ -48,6 +48,7 @@ typedef struct {
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
     int per_vsync;            // set by the caller: the ticks a 1/60 s vsync is (0 = 1). At 120 fps the unit is 1/120 s (hle_nvn.c fps_high), and the waits between trials stay the same real time
+    int step_max;             // set by the caller: the longest step handed while paying back (0 = FSTEP_MAX). At a 40 fps cap (ticks of 1/120 s, hold 3 = FSTEP_MAX) 6 = 20 fps, as FSTEP_MAX at 30; before, no payback there: 30 fps frames ran the game at 0.74 speed
     double shown_slack;       // vsyncs a frame on time may show longer than k (set by the caller): one refresh on screens whose rate is not a multiple of 60; the cost keeps FSTEP_LATE
     int screen;               // set by the caller before each call, then cleared: 0 = judge lateness by shown and cost; 1 = the screen showed a recent frame on time, 2 = late. With present
                               // snapshots (nvn_mtl.m) the game runs ahead of the screen and a frame that runs long is absorbed, so only what the screen shows counts
@@ -129,7 +130,9 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     }
-    s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
+    int top = s->step_max ? s->step_max : FSTEP_MAX, pay = s->debt >= 1 && s->k < top;
+    if (s->step_max && pay) pay = (int)s->debt < top - s->k ? (int)s->debt : top - s->k;   // 40 fps: whole ticks of the debt at once, so 21 fps frames keep up too (hold 3 + 1 covers only 30)
+    s->step = s->k + pay;
     s->paid += s->step > s->k;
     return s->step;
 }

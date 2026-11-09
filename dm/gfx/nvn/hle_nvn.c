@@ -2063,6 +2063,7 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
     g_fs.per_vsync = fstep_hz() / 60;
+    g_fs.step_max = fstep_hz() == 120 && !fps_high() ? 6 : 0;   // 40 fps: a late frame's debt is paid back up to 20 fps, as at 30 (Ocarina's stub reads the step as a float of ticks)
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
     host_s += (double)n / fstep_hz(); ticked |= fstep_hz() == 120;

@@ -32,6 +32,14 @@ int main(void) {
         run(&c, 120, 0.7, 1, 2, 0); check(c.s.k == 1, "120 fps: the cap's end returns to 120");
     }
     char b[160];
+    {   // 40 fps (hle_nvn.c fstep_unit): ticks of 1/120 s, hold 3 = FSTEP_MAX, hold off (kmax = kmin). Frames slower than 40 pay their debt back with longer steps
+        sim m = {0}; m.s.per_vsync = 2; m.s.step_max = 6;
+        run(&m, 600, 4.0, 3, 3, 0); snprintf(b, sizeof b, "40 fps: 30 fps frames keep the game at real time (%.3f)", m.game / m.real); check(m.game / m.real > 0.99, b);
+        sim n = {0}; n.s.per_vsync = 2; n.s.step_max = 6;
+        run(&n, 600, 5.6, 3, 3, 0); snprintf(b, sizeof b, "40 fps: 21 fps frames too (%.3f)", n.game / n.real); check(n.game / n.real > 0.99, b);
+        sim o = {0}; o.s.per_vsync = 2;
+        run(&o, 600, 4.0, 3, 3, 0); snprintf(b, sizeof b, "40 fps without step_max: the old 0.75 speed (%.3f)", o.game / o.real); check(o.game / o.real < 0.8, b);
+    }
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");
     }
