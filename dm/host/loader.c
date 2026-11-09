@@ -319,7 +319,7 @@ int dm_live_setting(const char *key, const char *val) {
     int ok = 0; char *end; float f;
     if (!strcmp(key, "DM_FPS_HOLD") && (!strcmp(val, "on") || !strcmp(val, "off"))) { void nvn_fstep_hold_set(int); nvn_fstep_hold_set(!strcmp(val, "on")); ok = 1; }
     else if (!strcmp(key, "DM_OPMODE") && (!strcmp(val, "0") || !strcmp(val, "1"))) { void dm_set_opmode(int); dm_set_opmode(*val - '0'); ok = 1; }
-    else if (!strcmp(key, "DM_FPS_TARGET") && (!strcmp(val, "30") || !strcmp(val, "60"))) { f = (float)atoi(val); uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0, b); }
+    else if (!strcmp(key, "DM_FPS_TARGET") && (!strcmp(val, "30") || !strcmp(val, "40") || !strcmp(val, "60"))) { f = (float)atoi(val); uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0, b); }
     else if (!strcmp(key, "DM_RENDER_SCALE") && (f = strtof(val, &end), end != val && !*end && f >= 0.5f && f <= 2.0f)) { uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0x10, b); }
     else if (!strcmp(key, "DM_DYNAMIC_RESOLUTION") && (!strcmp(val, "0") || !strcmp(val, "1"))) ok = put_u32(0x40, (uint32_t)(*val - '0'));
     if (ok) {   // not setenv: other threads may read the environment at the same time
@@ -334,7 +334,7 @@ int dm_live_setting(const char *key, const char *val) {
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
+    if (t != 0 && t != 30 && t != 40 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30, 40 or 60; using the game's own frame step", e); t = 0; }   // 40: hle_nvn.c fstep_unit (30 where the stub or the screen cannot)
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880): 1.0 keeps the game's own size and dynamic resolution;
     // another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to 2.0; above 1 the game draws more than its own top size, Ocarina of Time 1.33 = its 2048x1152 window). Independent of the frame step: written at target 0 too

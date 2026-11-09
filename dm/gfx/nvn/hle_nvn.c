@@ -1491,9 +1491,10 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
         LOG("[nvn] the game sets present interval %d → %d (from %s+%#llx)", ((win_t *)w)->interval, v, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); }
     ((win_t *)w)->interval = v;
 }
+static void texsize_trace(int w, int h);
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
-    if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
+    if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh); texsize_trace(ww, hh);   // DM_TEXSIZE_TRACE: the game code that sets this crop
     memcpy(o->crop, v, sizeof v);
 }
 NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonetta 3 reads it back every few frames; before any SetCrop it is the whole first texture, as NVN starts it
@@ -1871,7 +1872,11 @@ static int fps_high(void) {
     }
     return v;
 }
-static int fstep_hz(void) { return fps_high() ? 120 : 60; }   // the ticks the frame step counts in
+// 40 fps (DM_FPS_TARGET=40, a frame step state page game whose stub reads the step's unit: Ocarina of Time's marks state +0x204): the frame step counts in ticks of 1/120 s while
+// the cap is 40, 3 a frame, and writes the unit (120.0, else 60.0) to state +0x200 for the stub, which divides the step by it. On a screen below 120 Hz 40 frames a second cannot
+// be shown evenly, so the cap is 30 there; a movie and the thermal cap make it 30 as at 60 (in vsyncs of 1/60 s again: the unit follows the cap, fstep_unit)
+static int g_fs_hz = 60;   // present thread: the unit fstep_unit set for the cap in force
+static int fstep_hz(void) { return fps_high() || g_fs_hz == 120 ? 120 : 60; }   // the ticks the frame step counts in
 // Once per present: what the screen and the game's state allow now, and a display link at the rate the screen can show (DM_PRESENT_LINK keeps its own choice)
 static void high_cap_tick(void) {
     static int win = -1, link_env = -1;
@@ -1888,7 +1893,15 @@ static int fps_step_cap(void) {
     // Movies and a 30 fps target still need thermal samples: heat must reset the
     // calm interval, and cooling during those caps counts towards recovery.
     int thermal = thermal_capped();
-    return dm_movie_playing() || t <= 30 || thermal ? 30 : 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
+    if (dm_movie_playing() || t <= 30 || thermal) return 30;
+    if (t > 35 && t < 45) {   // 40: only for a stub that reads the unit, on a screen that shows 120 Hz (no window: the pacer's clock alone)
+        int marked = __atomic_load_n((uint32_t *)(dm_fps_state + 0x204), __ATOMIC_RELAXED) == 1, hz = mtl_display_hz() ? front_screen_max_fps() : 120;
+        if (marked && hz >= 120) return 40;
+        static int why_was; int why = !marked ? 1 : 2;
+        if (why != why_was && (marked || g_frame > 300)) { why_was = why; LOG("[RED] [nvn] 40 fps: %s, so the cap is 30", !marked ? "this main's frame step counts whole vsyncs of 1/60 s" : "the screen is below 120 Hz"); }
+        return 30;
+    }
+    return 60;   // a movie: its player takes a picture per game frame, paced for the Switch's 30 (hle_movie.c)
 }
 static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides the steps in whole vsyncs
 // Engine-native frame limiters have no frame-step state page. Their requested
@@ -1912,6 +1925,20 @@ static int fps_present_cap(void) {
 static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
+// Once per present, before the frame step: the unit for the cap in force (1/120 s at 40, else 1/60 s) and, when it changes, a frame step started again in it (its holds and costs
+// are counts of the old unit), the present tick (unless DM_PRESENT_HZ) and the display link at 120 Hz for 40 (unless DM_PRESENT_LINK). The unit is written for the stub every time
+static void fstep_unit(int c) {
+    if (!dm_fps_state || fps_high()) return;
+    int hz = c == 40 ? 120 : 60;
+    if (hz != g_fs_hz) {
+        static int link_set, env = -1; if (env < 0) env = getenv("DM_PRESENT_LINK") != NULL;
+        g_fs_hz = hz; memset(&g_fs, 0, sizeof g_fs); atomic_store(&g_fs_k, 0);
+        if (g_hz > 0 && !getenv("DM_PRESENT_HZ")) g_hz = hz;
+        if (!env && (hz == 120 ? mtl_link_active() : link_set)) { mtl_link_mode_set(hz == 120 ? 2 : 1); link_set = hz == 120; }
+        LOG("[nvn] frame step in ticks of 1/%d s (cap %d fps)", hz, c);
+    }
+    float u = (float)hz; uint32_t b; memcpy(&b, &u, 4); __atomic_store_n((uint32_t *)(dm_fps_state + 0x200), b, __ATOMIC_RELAXED);
+}
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
 int nvn_fps_high_now(void) { return atomic_load(&g_fs_k) == 1 ? 120 : 60; }   // hle_fpslock.c: the target of the next game frame, from the hold in force
 // The rate of vi::GetDisplayVsyncEvent (hle_sdk16.c, nvn_mtl.m mtl_link_wait_vsync): the Switch's 60 Hz, or 120 while 120 fps is on and its hold is one tick of 1/120 s. A game that
@@ -1938,7 +1965,7 @@ static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_l
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {
     static int hz_was, rate_was, remainder;   // acquire thread only, as with mtl_link_wait_ticks
-    if (fps_high()) { int t = present_itv(o) * mtl_link_rate() / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }   // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz
+    if (fstep_hz() == 120) { int t = present_itv(o) * mtl_link_rate() / 120; return mtl_link_wait_ticks(t < 1 ? 1 : t, timeout_ns); }   // the hold, in ticks of 1/120 s, on a link at 120 or 60 Hz (120 fps, or 40)
     int hz = g_display_mode && !fps_present_cap() && g_hz > 60 ? g_hz : 0, rate = mtl_link_rate();
     if (hz != hz_was || rate != rate_was) { remainder = 0; hz_was = hz; rate_was = rate; }
     if (hz) {
@@ -2005,7 +2032,7 @@ void nvn_fstep_hold_set(int on) { atomic_store(&g_fstep_hold, on ? 1 : 0); LOG("
 // Once per present, before this frame's period is taken: the time since the previous frame's start (shown) and the frame's cost decide this frame's hold and the next frame's step.
 // Cost = max(CPU: the time between the frames' starts without the pacing wait, GPU: the latest finished frame's GPU time), in vsyncs
 static void fstep_tick(const win_t *o, int c) {
-    static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog;
+    static uint64_t prev, t0, v0, fixed_sum, held[FSTEP_MAX + 1]; static int nlog, ticked; static double host_s, host_s0;   // host_s: the steps handed, in seconds (the stub's count mixes units at 40)
     const double v = 1e9 / fstep_hz();
     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
@@ -2038,6 +2065,7 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.per_vsync = fstep_hz() / 60;
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
+    host_s += (double)n / fstep_hz(); ticked |= fstep_hz() == 120;
     atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
@@ -2060,10 +2088,11 @@ static void fstep_tick(const win_t *o, int c) {
         if (o->presents % 1800 == 0) { LOG("[nvn] 120 fps: held 1 / 2 ticks %llu / %llu frames, %llu late, %llu up / %llu down (%llu probes, %llu failed trials)", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)g_fs.late, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed); memset(held, 0, sizeof held); }
     } else if (o->presents % 1800 == 0) {   // game time against real time (1.000 = normal speed; lower when a device cannot hold 20 fps or after long stalls)
         uint64_t vs = __atomic_load_n((uint64_t *)(dm_fps_state + 0x30), __ATOMIC_RELAXED) + fixed_sum, t = now_ns();
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)",
-                    (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
+        double gs = ticked ? host_s - host_s0 : (vs - v0) / 60.0;   // at 40 the stub's count mixes 1/60 and 1/120 s: the host's steps in seconds instead
+        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 %s %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials)",
+                    gs, (t - t0) / 1e9, gs / ((t - t0) / 1e9), ticked ? "ticks of 1/120 s (host's steps)" : "vsyncs", (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
                     (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed);
-        t0 = t; v0 = vs; memset(held, 0, sizeof held);
+        t0 = t; v0 = vs; host_s0 = host_s; ticked = fstep_hz() == 120; memset(held, 0, sizeof held);
     }
 }
 // The crop a present shows: the window's own (nvnWindowSetCrop), else the vi layer's (vi::SetLayerCrop, hle_vi.c); on the Switch both become the crop of the buffer queued to the layer.
@@ -2087,6 +2116,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 4), (uint32_t)dm_movie_playing(), __ATOMIC_RELAXED);   // the stubs' copy of the movie state (hle.h)
     int c = fps_step_cap();
     if (dm_fps_state) { static int was; if (c != was) { LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, c == 30 && was == 60 ? (dm_movie_playing() ? " (movie playing)" : thermal_capped() ? " (thermal state serious)" : "") : ""); was = c; } }
+    fstep_unit(c);
     if (c) fstep_tick(o, c);
     dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
     static uint64_t prev_in, prev_out, prev_pass, prev_draw;
@@ -2438,7 +2468,21 @@ NVN(nvnSamplerCompare, NVNboolean, const NVNsampler *a, const NVNsampler *b) {
 }
 
 // Texture builder / texture / view
-NVN(nvnTextureBuilderSetSize2D, void, NVNtextureBuilder *b, int w, int h) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1; }
+// DM_TEXSIZE_TRACE=WxH (diagnostic): a 2D texture builder given that size logs the game's call chain by its frame pointers, as module+offset, the first 8 times: which code
+// decides a render target's size (Ocarina of Time's 2048x1152 canvas). Return addresses saved after pacibsp may carry a pointer signature: the high bits are dropped
+static void texsize_trace(int w, int h) {
+    static int tw = -1, th, n; if (tw < 0) { const char *e = getenv("DM_TEXSIZE_TRACE"); if (!e || sscanf(e, "%dx%d", &tw, &th) != 2) tw = 0; }
+    if (!tw || w != tw || h != th || n >= 8) return;
+    n++; char line[640]; int o = snprintf(line, sizeof line, "DM_TEXSIZE_TRACE %dx%d #%d:", w, h, n);
+    uint64_t *fp = __builtin_frame_address(0);
+    for (int i = 0; i < 14 && fp && o < (int)sizeof line - 40; i++) {
+        uint64_t lr = fp[1] & 0x00007fffffffffffull; module_t *m = module_of((void *)lr);
+        o += m ? snprintf(line + o, sizeof line - o, " %s+%#llx", m->name, (unsigned long long)(lr - (uint64_t)(uintptr_t)m->base)) : snprintf(line + o, sizeof line - o, " host");
+        uint64_t *nfp = (uint64_t *)(uintptr_t)(fp[0] & 0x00007fffffffffffull); if (nfp <= fp) break; fp = nfp;
+    }
+    LOG("%s", line);
+}
+NVN(nvnTextureBuilderSetSize2D, void, NVNtextureBuilder *b, int w, int h) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = 1; texsize_trace(w, h); }
 NVN(nvnTextureBuilderSetSize3D, void, NVNtextureBuilder *b, int w, int h, int d) { TB(b)->d.width = w; TB(b)->d.height = h; TB(b)->d.depth = d; }
 NVN(nvnTextureBuilderSetSwizzle, void, NVNtextureBuilder *b, NVNtextureSwizzle r, NVNtextureSwizzle g, NVNtextureSwizzle bl, NVNtextureSwizzle a) {
     tex_builder_t *o = (tex_builder_t *)b; o->set_swz = 1; o->swz = (uint16_t)((r & 7) | (g & 7) << 3 | (bl & 7) << 6 | (a & 7) << 9);
