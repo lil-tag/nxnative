@@ -154,7 +154,9 @@ static _Atomic uintptr_t g_crash_owner;
 static void crash_gate(int sig) {
     uintptr_t me = (uintptr_t)pthread_self(), none = 0;
     if (atomic_compare_exchange_strong(&g_crash_owner, &none, me)) { alarm(15); return; }
-    if (none == me) _exit(128 + sig);
+    // SIGALRM is the 15 s safety: the kernel hands it to any thread, so one waiting here exits too. Without this an owner stuck in its dump (dladdr, 2026-11-08: Ocarina of Time's
+    // audio thread, every other thread paused here) kept the game frozen with 8 cores busy for 6.5 hours
+    if (none == me || sig == SIGALRM) _exit(128 + sig);
     for (;;) pause();
 }
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
