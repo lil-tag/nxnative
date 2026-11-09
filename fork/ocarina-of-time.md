@@ -17,7 +17,7 @@ The Legend of Zelda: Ocarina of Time, the Switch 2 remake, version 1.1.1, on a M
 | Branch | State |
 |---|---|
 | `ocarina-7` | The build I play. Upstream's code from 8 November 2026, plus upstream pull requests that weren't merged yet, plus this fork's own fixes. |
-| `ocarina-8` | `ocarina-7` plus HDR output and a lighting fix. Still being tested. |
+| `ocarina-8` | `ocarina-7` plus HDR output, a 40 fps choice and a lighting fix. Still being tested. |
 | `ocarina-2` | An older attempt, on upstream from 5 November. Kept for history only. |
 
 ## Build it
@@ -38,7 +38,7 @@ These are the settings you can change for this game. Most appear in the settings
 
 | Setting | Variable | What it does |
 |---|---|---|
-| Frame rate (live) | `DM_FPS_TARGET` | 30 or 60 frames per second. 30 is steadier on an M4. |
+| Frame rate (live) | `DM_FPS_TARGET` | 30 or 60 frames per second. 30 is steadier on an M4. On `ocarina-8` also 40, on a screen that shows 120 Hz; on other screens 40 falls back to 30. |
 | Hold frames when late (live) | `DM_FPS_HOLD` | When a frame is late, the game waits for a whole extra screen refresh, so motion stays even but the rate can drop to 20. On by default. On the test walk, on the earlier `ocarina-5` branch, it gave 27 fps with it on and 31 with it off. |
 | Render scale (live) | `DM_RENDER_SCALE` | The size the 3D picture is drawn at. Below 1.0 is softer; above 1.0, up to 2.0, draws more than the game's own top size and is sharper. In our tests 0.83 drew 1304×734 and 1.25 drew 1951×1098. On the M4 it changes the frame rate less than you'd expect, because most of the time goes to the number of things drawn, not their size. |
 | Dynamic resolution (live) | `DM_DYNAMIC_RESOLUTION` | Lets the game lower its resolution when busy, as on the console. Off by default here. |
@@ -135,7 +135,7 @@ The two `ocarina-7` runs differ by 6 fps, so one run isn't enough to rank the la
 
 ## What's still wrong
 
-- **Render scale stops at 2048×1152.** The 1440p choice has never drawn more than that, at launch or live. Cause not found yet.
+- **Render scale stops at 2048×1152.** The 1440p choice has never drawn more than that, at launch or live. The limit is traced to the size of the game's own frame buffer, and not changed yet.
 - **The picture flickers in brightness while the camera pans.** It didn't with the resolution held still, so "Fixed resolution" may help.
 - **Castle Town's market is heavy:** 2,000 to 3,300 draws a frame, 23 to 30 fps when measured on an older branch, before the faster shaders above.
 - **Memory grew on a still screen once,** by 192 KB a frame for 16 minutes, until the guard stopped the game. A 36-minute test didn't repeat it. Cause not found.
@@ -148,8 +148,8 @@ The two `ocarina-7` runs differ by 6 fps, so one run isn't enough to rank the la
 On `ocarina-8`:
 
 - **HDR output** for an HDR screen: merged from #1176, being tested.
-- **A 40 fps choice,** between 30 and 60: being written.
-- **Real 1440p:** finding what stops render scale at 2048×1152.
+- **A 40 fps choice,** between 30 and 60, for screens that show 120 Hz: added, not played yet. It's in the Frame rate setting and the Game menu.
+- **Real 1440p:** the game's frame buffer size that stops render scale at 2048×1152 is found; changing it is next.
 
 ## Credits
 
