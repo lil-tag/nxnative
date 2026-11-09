@@ -25,7 +25,7 @@ Each game sits on its own branch, because each needed a different version of ups
 | Branch | Use it for | What's in it | Online play |
 |---|---|---|---|
 | `ocarina-7` | The Legend of Zelda: Ocarina of Time | The build I play now. Upstream from 8 November 2026, plus the changes in the [Ocarina guide](fork/ocarina-of-time.md). | No, the game is single-player |
-| `ocarina-8` | Ocarina of Time, next version | `ocarina-7` plus HDR output, a 40 fps choice and a lighting fix. Still being tested. | No |
+| `ocarina-8` | Ocarina of Time, next version | `ocarina-7` plus HDR output, real 1440p, a 40 fps choice and a lighting fix. Still being tested. | No |
 | `nextendo` | Online play, saves, Miis, and the other games below | Upstream from 3 November 2026, plus this fork's online play, save and Mii features. | Yes |
 | `mario-kart-world-2` | Mario Kart World 1.0.0 | The `nextendo` branch on upstream from 4 November 2026, plus LAN play and Mario Kart fixes. | Yes, and LAN |
 | `fever` | Mario Tennis Fever | The `nextendo` branch on upstream from 4 November 2026, plus Fever fixes. | Yes |
