@@ -38,7 +38,7 @@ def frame_step(ctx):
     emit(0x1e201828); emit(B(here(), site + 4))   # orig: fdiv s8,s1,s0; back
     fs_put(site, [B(site, start)], 'frame ratio: the host\'s step × base rate / its ticks a second (60, or 120 at a 40 fps cap) instead of base rate / the game\'s frame rate (state page target fps; 0 = the game\'s ratio)')
     dynamic_resolution(ctx)
-    if base == 0x6e6be0: render_scale(ctx)   # v131072 (1.1.1): its site is this build's offset
+    if base == 0x6e6be0: render_scale(ctx); canvas_scale(ctx)   # v131072 (1.1.1): their sites are this build's offsets
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority). Its controller's update (main+0x805aa0, v131072) reads the frame's GPU time, subtracts what its cost model predicts at the current size and keeps the residual's trend;
@@ -81,6 +81,26 @@ def render_scale(ctx):
         emit(w)
     emit(B(here(), 0x654ff4)); emit(B(here(), 0x654efc))
     ctx.put(0x654ef8, [B(0x654ef8, start)], 'view render size x the host render scale (1.0 = original)'); ctx.render_scale = 1
+
+# Canvas scale (state +0x208, float written by the loader: DM_FRAME_BUFFER_SCALE; 0 or unset = the original). The renderer's update (v131072 main+0x6505b8) sizes its frame buffer, the 2D
+# canvas the 3D views are stretched into and the HUD is drawn on, as the window's size (2560x1440 docked) times a factor from its mode table (0.8: 2048x1152), capped by the window
+# (main+0x112c5e0), and hands it to main+0x1087f40; the window is then cropped to it (main+0x650560, nvnWindowSetCrop). So 2048x1152 is all the game draws docked, and a render
+# scale above 1.33 could not make the 3D larger: the view sizing (main+0x654e70) never draws the 3D larger than this canvas. The stubs multiply both sizes by the host's factor
+# before they are made integers (1.25 = 2560x1440, the window: real 1440p); the cap after them keeps a larger factor at the window. s2 and x16 / x17 are free at both sites (s2 is
+# dead after the width's fmul, x16 / x17 are not used before the call that follows), and no flags are set (cbz only)
+def canvas_scale(ctx):
+    here, emit = ctx.here, ctx.emit
+    for site, orig, cvt in ((0x6505c8, '1500381e', 0x1e380015), (0x6505d8, '1600381e', 0x1e380016)):   # fcvtzs w21,s0 (width) / fcvtzs w22,s0 (height)
+        ctx.site(site, orig)
+        start = here(); emit(ADRP(16, here(), ctx.state))
+        for w in (0xb9420a11,   # ldr w17,[x16,#0x208]   canvas scale (float bits; 0 = original)
+                  0x34000071,   # cbz w17,+12
+                  0x1e270222,   # fmov s2,w17
+                  0x1e220800,   # fmul s0,s0,s2
+                  cvt):         # the original fcvtzs
+            emit(w)
+        emit(B(here(), site + 4))
+        ctx.put(site, [B(site, start)], 'frame buffer (2D canvas) size x the host\'s canvas scale (DM_FRAME_BUFFER_SCALE; 1440p: 1.25)')
 
 MATCH_FRAME_STEP = {'main': [
     {'name': 'frame ratio from the host\'s step', 'size': 0x9b4, 'fingerprints': ['6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d'], 'stub': frame_step,   # v131072 main+0x6e6be0

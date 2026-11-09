@@ -320,7 +320,8 @@ int dm_live_setting(const char *key, const char *val) {
     if (!strcmp(key, "DM_FPS_HOLD") && (!strcmp(val, "on") || !strcmp(val, "off"))) { void nvn_fstep_hold_set(int); nvn_fstep_hold_set(!strcmp(val, "on")); ok = 1; }
     else if (!strcmp(key, "DM_OPMODE") && (!strcmp(val, "0") || !strcmp(val, "1"))) { void dm_set_opmode(int); dm_set_opmode(*val - '0'); ok = 1; }
     else if (!strcmp(key, "DM_FPS_TARGET") && (!strcmp(val, "30") || !strcmp(val, "40") || !strcmp(val, "60"))) { f = (float)atoi(val); uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0, b); }
-    else if (!strcmp(key, "DM_RENDER_SCALE") && (f = strtof(val, &end), end != val && !*end && f >= 0.5f && f <= 2.0f)) { uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0x10, b); }
+    else if (!strcmp(key, "DM_RENDER_SCALE") && (f = strtof(val, &end), end != val && !*end && f >= 0.5f && f <= 2.0f)) { uint32_t b; memcpy(&b, &f, 4); ok = put_u32(0x10, b);
+        if (ok && !getenv("DM_FRAME_BUFFER_SCALE")) { float c = f > 1.34f ? 1.25f : 1.0f; memcpy(&b, &c, 4); put_u32(0x208, b); } }   // the canvas follows (the game may take it only at its next mode change)
     else if (!strcmp(key, "DM_DYNAMIC_RESOLUTION") && (!strcmp(val, "0") || !strcmp(val, "1"))) ok = put_u32(0x40, (uint32_t)(*val - '0'));
     if (ok) {   // not setenv: other threads may read the environment at the same time
         for (int i = 0; i < (int)(sizeof g_live / sizeof *g_live); i++) if (!strcmp(g_live[i].k, key)) snprintf(g_live[i].v, sizeof g_live[i].v, "%s", val);
@@ -341,6 +342,11 @@ void dm_fps_state_apply(void) {
     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f;
     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 2.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 2.0; keeping the game's size", rs); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    // Frame buffer scale (+0x208, the stubs of builds that size a 2D canvas below the window: Ocarina of Time v131072, its 2048x1152 docked): DM_FRAME_BUFFER_SCALE (0.5 to 2.0),
+    // by default 1.25 when the render scale asks for 3D views larger than that canvas (above 1.34: 1440p), so the canvas grows to the window and the 3D with it; else 1.0, the original
+    { const char *fb = getenv("DM_FRAME_BUFFER_SCALE"); float f = sc > 1.34f ? 1.25f : 1.0f; char *end;
+      if (fb && *fb) { float v = strtof(fb, &end); if (end != fb && !*end && v >= 0.5f && v <= 2.0f) f = v; else LOG("[RED] DM_FRAME_BUFFER_SCALE=%s: must be 0.5 to 2.0; using %.2f", fb, f); }
+      memcpy(dm_fps_state + 0x208, &f, sizeof f); if (f != 1.0f) LOG("%s: frame buffer (2D canvas) at %.2f of the game's size (%s)", g_fps_mod, f, fb && *fb ? "DM_FRAME_BUFFER_SCALE" : "render scale above 1.34"); }
     // Fixed resolution (the builds with a fixed-resolution stub, Ocarina of Time v131072: dm/games/0400486024DEC000/patches.py): DM_FIXED_RESOLUTION=1 makes the game's resolution
     // controller take its own "dynamic resolution disabled" path, the 3D at its top size, and DM_FIXED_SCALE (0.5 to 1.0) sets that path's scale; state +0x60 u32, +0x64 the scale's
     // float bits (0 = the game's 1.0). Independent of the frame step and of DM_RENDER_SCALE (which still caps a dynamic resolution)
